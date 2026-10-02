@@ -23,24 +23,62 @@ jobs:
 
       - run: go test -count=1 ./...
 
-      - name: Cross-compile
+      - name: Build one archive per platform
         run: |
           set -eu
+          v=$GITHUB_REF_NAME
+          ldflags="-s -w -X github.com/ellingtonsp/herdr-orch/internal/daemon.Version=$v"
           mkdir -p dist
-          ldflags="-s -w -X github.com/ellingtonsp/herdr-orch/internal/daemon.Version=$GITHUB_REF_NAME"
-          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
-            os=${target%/*}; arch=${target#*/}
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            goos=${target%/*}; arch=${target#*/}
+            os=$goos; [ "$os" = darwin ] && os=macos
+            name="herdr-orch-${v}-${os}-${arch}"
+            mkdir -p "stage/$name"
             for bin in herdr-orch horch; do
-              out="${bin}-${os}-${arch}"
-              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "dist/$out" "./cmd/$bin"
-              ( cd dist && sha256sum "$out" | awk '{print $1}' > "$out.sha256" )
+              CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "stage/$name/$bin" "./cmd/$bin"
             done
+            cp README.md LICENSE CHANGELOG.md "stage/$name/"
+            tar -C stage -czf "dist/$name.tar.gz" "$name"
           done
+          ( cd dist && sha256sum *.tar.gz > checksums.txt )
           ls -la dist
+
+      - name: Release notes
+        run: |
+          v=$GITHUB_REF_NAME
+          cat > notes.md <<NOTES
+          ## Install
+
+          **You don't need to download anything from this page.** In herdr:
+
+          \`\`\`bash
+          herdr plugin install ellingtonsp/herdr-orch
+          herdr plugin action invoke herdr-orch.install-cli   # puts horch on your PATH
+          \`\`\`
+
+          The installer picks the right file below for your machine and verifies it.
+
+          ### Installing by hand
+
+          | Your machine | File |
+          |---|---|
+          | Mac with Apple silicon (M1 and later) | \`herdr-orch-${v}-macos-arm64.tar.gz\` |
+          | Mac with an Intel processor | \`herdr-orch-${v}-macos-amd64.tar.gz\` |
+          | Linux, x86-64 | \`herdr-orch-${v}-linux-amd64.tar.gz\` |
+          | Linux, ARM64 | \`herdr-orch-${v}-linux-arm64.tar.gz\` |
+
+          Each archive contains both binaries (\`herdr-orch\`, the plugin, and \`horch\`, the CLI) plus
+          the README. Check it against \`checksums.txt\` (\`shasum -a 256 -c checksums.txt --ignore-missing\`).
+          Not sure which Mac you have? Apple menu → About This Mac → Chip. "Apple" means arm64.
+
+          See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${v}/CHANGELOG.md) for what changed.
+          NOTES
+          sed -i 's/^          //' notes.md
+          cat notes.md
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes \
+          gh release create "$GITHUB_REF_NAME" dist/* --title "herdr-orch $GITHUB_REF_NAME" --notes-file notes.md \
             || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

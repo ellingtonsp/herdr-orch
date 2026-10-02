@@ -64,16 +64,37 @@ Running several agents in parallel breaks down in the same few places:
 
 ## Install
 
+You don't download anything from the Releases page yourself. In herdr:
+
 ```bash
 herdr plugin install ellingtonsp/herdr-orch
 herdr plugin action invoke herdr-orch.install-cli   # symlinks horch into ~/.local/bin
 ```
+
+The installer picks the right release archive for your machine, verifies its checksum, and
+builds from source only if there is no match (that needs Go).
 
 The daemon starts with the herdr server. Until the next server restart, the first `horch` command
 starts it. Check with `horch status`.
 
 To let a Claude Code agent coordinate, give it the guide: `horch guide` prints it. It is also at
 [`skills/horch/SKILL.md`](skills/horch/SKILL.md), which you can copy into a skills directory.
+
+### Installing by hand
+
+Each [release](https://github.com/ellingtonsp/herdr-orch/releases/latest) has one archive per
+platform and a `checksums.txt`:
+
+| Your machine | Archive |
+|---|---|
+| Mac with Apple silicon (M1 and later) | `herdr-orch-v<version>-macos-arm64.tar.gz` |
+| Mac with an Intel processor | `herdr-orch-v<version>-macos-amd64.tar.gz` |
+| Linux, x86-64 | `herdr-orch-v<version>-linux-amd64.tar.gz` |
+| Linux, ARM64 | `herdr-orch-v<version>-linux-arm64.tar.gz` |
+
+To check which Mac you have: Apple menu → About This Mac → Chip ("Apple" means arm64). Each
+archive contains `herdr-orch` (the plugin) and `horch` (the CLI). To use them by hand, clone the
+repo at the release tag, put both binaries in its `bin/`, and run `herdr plugin link <repo>`.
 
 ## Updating
 
