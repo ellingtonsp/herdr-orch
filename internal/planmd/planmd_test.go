@@ -3,6 +3,7 @@ package planmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -137,6 +138,51 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	if again := Render(w2.View, events); again != md {
 		t.Fatalf("second export differs:\n%s", diff(md, again))
+	}
+}
+
+func TestExportPreservesCompleteItemsAndReleaseState(t *testing.T) {
+	s := openStore(t)
+	seed := store.PlanSeed{Hash: "roundtrip", Items: []store.PlanItem{
+		{ID: "A", State: store.ItemDispatched, Listed: true, Model: "codex", What: store.ItemWhat{Where: "desk", Output: "line one\nline two | pipe"}},
+		{ID: "H", State: store.ItemHeld, Held: true, Listed: false, Title: "held", Why: "reason\ncontinued", Kind: "review", PR: "#2"},
+	}}
+	w, err := s.ImportPlan(seed, store.ImportOptions{Day: "2026-10-02", Project: "p"}, orch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HoldItem(w.View.Plan.ID, "A", "pause", 0, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MoveItem(w.View.Plan.ID, "H", 1, 0, owner); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := s.GetPlanView(w.View.Plan.ID)
+	es, _ := s.PlanEvents(w.View.Plan.ID, 0, 0)
+	parsed, warnings, err := Parse(Render(v, es))
+	if err != nil || len(warnings) > 0 {
+		t.Fatalf("parse: %v %v", err, warnings)
+	}
+	s2 := openStore(t)
+	w2, err := s2.ImportPlan(parsed, store.ImportOptions{Day: "2026-10-02", Project: "p"}, orch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, before := range v.Items {
+		after := w2.View.Items[i]
+		before.Version, before.CreatedAt, before.UpdatedAt = 0, 0, 0
+		after.Version, after.CreatedAt, after.UpdatedAt = 0, 0, 0
+		if !reflect.DeepEqual(before, after) {
+			t.Fatalf("item lost data: %+v / %+v", before, after)
+		}
+	}
+	released, err := s2.ReleaseItem(w2.View.Plan.ID, "A", "", 0, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := released.View.Item("A")
+	if a.State != store.ItemDispatched {
+		t.Fatalf("release returned to %s", a.State)
 	}
 }
 

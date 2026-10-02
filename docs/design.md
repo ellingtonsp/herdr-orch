@@ -93,6 +93,13 @@ Item states: `planned dispatched settled bounced ratified merged held replanned 
   plan reproduces the published file byte for byte, and an export (with its event log)
   imports back to the same plan. Held rows that are not Items rows become unlisted held
   items: they appear only under "Held on purpose" until released.
+  Live exports include all items in the Items table, with a canonical JSON `details`
+  column preserving held-from state, listing status, ordering and multiline values.
+  When importing an export, that column supplies the item's complete content; the other
+  cells and What/Why/Held sections are readable projections. Edit `details` when changing
+  an exported item before re-importing. Published proposals without this column retain
+  their existing layout and parsing behavior. Versions and timestamps are assigned anew
+  on import; the exported event log is displayed as text, not replayed into the new store.
 - **Import is idempotent.** Re-importing the same file is a no-op and keeps live edits. A
   different file for the same day is refused unless `--replace`, which reseeds the items and
   keeps the event log.

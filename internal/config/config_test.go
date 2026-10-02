@@ -88,6 +88,23 @@ func TestSecretRejected(t *testing.T) {
 	}
 }
 
+func TestInvalidConfigDoesNotExposeValues(t *testing.T) {
+	for _, body := range []string{
+		"[integrations.linear]\napi_key = lin_sensitive_value\n",
+		"[agents.build]\nkind = \"lin_sensitive_value\"\n",
+		"default_project = \"lin_sensitive_value\"\n",
+		"[owner]\nprincipal = \"lin_sensitive_value\"\nunknown = 1\n",
+	} {
+		c, err := LoadFile(write(t, body))
+		if err == nil {
+			t.Fatal("expected refusal")
+		}
+		if strings.Contains(err.Error(), "lin_sensitive_value") || c.DefaultProject != "" || c.Owner.Principal != "" || c.Found || len(c.Agents) != 0 {
+			t.Fatalf("invalid config exposed rejected values: %+v %v", c, err)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	for _, body := range []string{
 		"[agents.build]\nkind = \"gpt\"\n",

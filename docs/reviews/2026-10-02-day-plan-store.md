@@ -1,0 +1,46 @@
+# W1r independent review — day-plan store
+
+Verdict: **APPROVED WITH FIXES**. Findings: **C0 / H0 / M6 / L3**. All six MEDIUM findings are fixed in one bounded batch; three LOW findings are retained below. No outstanding HIGH or MEDIUM findings.
+
+Reviewed draft PR [#2](https://github.com/ellingtonsp/herdr-orch/pull/2), branch `feat/day-plan-store`, starting at live head `661d4fd3fa14afc948c72f708aad3e5432702d82` against `origin/main` (`d0823cf`). The fixes, regressions, and this report are in the review commit. The PR comment binds the resulting exact SHA. Builder: Claude Opus 5.5; independent reviewer: Codex.
+
+## Findings and disposition
+
+| ID | Severity | Finding | Disposition and regression |
+|---|---|---|---|
+| M1 | MEDIUM | `INSERT OR REPLACE` could overwrite an existing `plan_events.seq`: SQLite does not fire the implicit delete trigger with recursive triggers disabled. UPDATE/DELETE tests missed this. | **FIXED.** Additive migration 4 rejects insert collisions before replacement. Migration 3 is unchanged. `TestEventsRejectReplace` verifies rejection and unchanged actor/sequence; schema-3 upgrade coverage protects historical events. Original probe failed before the fix. |
+| M2 | MEDIUM | `GetPlanView` read plan/items/decisions separately, and export subsequently read events separately. Concurrent writes produced plan v3 with item content from v4, or an event log newer than exported rows. | **FIXED.** Transactional views and `GetPlanSnapshot` read content plus history from one SQLite snapshot. Export holds the engine lock across finalization, publication, and snapshot. `TestConcurrentPlanSnapshots` checks version/content/history consistency under concurrent edits. Original probe failed before the fix. |
+| M3 | MEDIUM | Markdown roundtrip lost `HeldFrom`, so release returned a previously dispatched item to planned. It also lost unlisted ordering/metadata and titleless What fields; multiline data was flattened. The original comparator explicitly erased `HeldFrom`. | **FIXED.** Live exports include all items with a canonical JSON `details` column; import restores complete item content in row order. The legacy published layout remains unchanged when rendering without an event log. `TestExportPreservesCompleteItemsAndReleaseState` compares every item field except assigned versions/timestamps, including unlisted placement, titleless What content, multiline values and held-from state, then checks release returns to dispatched. Regression failed before the fix. |
+| M4 | MEDIUM | `plan item add --state held` created state=held with held=false, bypassing the hold/transition guard. | **FIXED.** Add rejects held state and directs the caller through `item hold`. `TestAddCannotBypassHold` checks refusal and unchanged rows, version, and event count. Regression failed before the fix. |
+| M5 | MEDIUM | Rejected config could still supply an owner/defaults: `LoadFile` returned partially decoded data on errors and `userConfig` used it. Validation errors also echoed rejected string values into CLI/daemon diagnostics. | **FIXED.** Invalid loads return an empty config, daemon discards loader output on any error, and decoder/enum/default-project errors omit rejected values. `TestInvalidConfigDoesNotExposeValues` covers parse/validation/unknown-key failures; `TestRejectedConfigCannotGrantApprovalOrBePublished` proves rejected owners cannot grant approval or be returned by `plan.config`. Both regressions failed before the fix. |
+| M6 | MEDIUM | Add/move/remove renumbered displaced items without changing their versions, allowing a stale positional write with `--if-version` to succeed. | **FIXED.** Renumber advances version/timestamp only for changed positions. The moved item advances once; new items retain v1. `TestOrderingChangesInvalidateDisplacedItemVersion` covers all three operations, stale refusal, and a current-version retry. All three cases failed before the fix. |
+| L1 | LOW | A stream already blocked in `conn.Write` can take up to its 10-second write deadline to react to daemon context cancellation. | **RETAINED.** Cleanup is bounded; a blocked subscriber does not block publication or other clients. The deadline cleanup regression proves the subscription is removed. Immediate close on cancellation is a future responsiveness improvement. |
+| L2 | LOW | Store-level import existence/hash checks occur outside the transaction. Concurrent direct `Store.ImportPlan` callers can race the initial existence decision and receive a uniqueness failure rather than an idempotent result. | **RETAINED.** Production imports are serialized by `opPlanImport`'s engine mutex, and the store documents a single daemon writer. No production path bypassing this serialization was found. Move checks into the transaction if multi-writer embedding becomes supported. |
+| L3 | LOW | The store accepts item IDs with surrounding whitespace or embedded newlines. Markdown cells trim/flatten those IDs, so their visible ID can disagree with canonical details and re-import is refused. | **RETAINED.** Normal published IDs roundtrip. This pre-existing permissive-ID edge needs future ID validation or a lossless ID representation; callers should use IDs without surrounding whitespace or newlines. |
+
+## Coverage and trust boundaries
+
+- Migration tests seed populated schema-2 and schema-3 databases with running run/task/dispatch/message rows, upgrade and reopen twice, and verify preserved data, versions and historical events. Each migration is transactional and forward-only. No live database was opened or migrated by this review.
+- Eight simultaneous conditional writers produce exactly one successful edit and seven `version_conflict` refusals. An external SQLite write lock produces `SQLITE_BUSY` with no leaked rows/events/version bump; a subsequent retry succeeds. Production retains the existing 5-second busy timeout and single connection; no new automatic write retry was added.
+- Same-file import keeps live edits; different-file import needs explicit `--replace`; history is kept. Final plans refuse edits. Finalize/export and held transition/release tests pass. Importing an export creates fresh versions/timestamps and an import event; it does not replay the exported event log.
+- Fan-out tests fill a slow subscriber's 256-event buffer while a healthy subscriber receives every event, then verify the slow subscriber is removed. Socket tests cover backlog/live delivery, hang-up cleanup, a blocked peer's write deadline, isolated engine shutdown and fresh-engine cursor replay. This is temporary-socket evidence, not a restart of the production daemon.
+- Actor, kind and approval come from the request caller plus daemon classification. A worker request carrying forged actor/kind/approval fields still records its worker identity and approval=false. Explicit `--as`/`--principal` remain trusted same-user overrides on a 0600 Unix socket; this is not authenticated human approval. A named owner principal marks approval; non-owner human edits still apply, are approval=false, and notify the coordinator accordingly. Worker/orchestrator edits without a human principal do not gain approval.
+- Config stores preferences and names of credential sources. Resolved env/Keychain credentials are not in the config struct or event payloads; lookup/missing-settings tests do not expose their values. Rejected config is never applied or published. No new path records a resolved credential in logs/events.
+- Existing request/response structs and existing CLI operations retain their wire shapes. Streaming uses a separate op/path. Existing command/client/engine suites pass. The exported Items `details` column is an intentional additive Markdown format change, documented in `docs/design.md`; it is canonical when present, and the other item projections are for reading.
+
+## Verification
+
+Final code batch: `GOCACHE=/private/tmp/w1r-go-cache make vet test race` — **PASS**, including `go vet ./...`, `go test ./...`, and `go test -race -count=1 ./...`. `git diff --check` — **PASS**. Local full log: `/private/tmp/w1r-make-vet-test-race.log`.
+
+The sandbox initially denied temporary Unix socket binds; the same suite passed with elevated execution using isolated fixtures. `make integration` was not run: the dispatch records its pre-existing origin/main idle-escalation failure before the new plan step. That limitation was not reverified here. No install/link/live target, merge, daemon stop/restart, or default-session change was performed.
+
+## Review team
+
+Two native scoped reviewers, maximum fan-out two; no Astra workers:
+
+| Task ID | Scope | Requested model / effort | Effective model / effort |
+|---|---|---|---|
+| `/root/store_review` | SQLite migration, transactions, versions, snapshots, hold guards | `gpt-6.1-sol` / `high` | Not exposed by the native harness |
+| `/root/stream_review` | Daemon streaming, identity, export, config failure handling; final parent delta review | `gpt-6.1-sol` / `high` | Not exposed by the native harness |
+
+Parent Codex independently reviewed CLI, config, Markdown, production reachability and the combined fix diff; the runtime did not expose its exact model/effort. Scoped reviewers supplied failing repros, implemented assigned fixes, and passed targeted normal/race suites. Full-suite evidence above governs the final verdict.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -104,6 +105,52 @@ func TestPlanVersionConflictOverRPC(t *testing.T) {
 	wantRefusal(t, err, "version_conflict")
 	_, err = x.op("human", "plan.item.add", PlanItemArgs{Item: "B9", IfPlanVersion: v.Plan.Version})
 	wantRefusal(t, err, "version_conflict")
+}
+
+func TestPlanActorFieldsAreDerivedByDaemon(t *testing.T) {
+	x := planHarness(t)
+	setupRun(x, "w1:p2")
+	// An ordinary client can select its caller/principal in the existing local
+	// trust model, but cannot send an independent actor kind or approval flag.
+	raw, err := x.op("w1:p2", "plan.item.update", map[string]any{
+		"item": "B1", "patch": map[string]any{"title": "worker change"},
+		"actor": "human", "actor_kind": store.ActorHuman, "approval": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := lastEvent(t, raw)
+	if ev.Actor != "w1:p2" || ev.ActorKind != store.ActorWorker || ev.Approval || ev.Principal != "" {
+		t.Fatalf("client supplied actor fields were trusted: %+v", ev)
+	}
+}
+
+func TestRejectedConfigCannotGrantApprovalOrBePublished(t *testing.T) {
+	x := planHarness(t)
+	x.e.cfg.UserConfig = func() (config.Config, error) {
+		return config.Config{
+			Owner:          config.Owner{Principal: "stephen", Name: "rejected-private-value"},
+			DefaultProject: "novara",
+		}, errors.New("invalid config")
+	}
+	// Explicit project selection still finds the existing plan, but a rejected
+	// owner identity must never turn a named principal into an approval.
+	raw, err := x.op("human", "plan.item.hold", PlanItemArgs{
+		PlanRef: PlanRef{Project: "novara", Principal: "stephen"}, Item: "B1", Reason: "hold",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := lastEvent(t, raw); ev.Approval || ev.Principal != "stephen" {
+		t.Fatalf("rejected config granted approval: %+v", ev)
+	}
+	raw, err = x.op("human", "plan.config", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "stephen") || strings.Contains(string(raw), "rejected-private-value") || strings.Contains(string(raw), "novara") {
+		t.Fatalf("rejected config was published: %s", raw)
+	}
 }
 
 func TestPlanEventsLongPollWakes(t *testing.T) {
@@ -232,4 +279,142 @@ func TestPlanExportFinalize(t *testing.T) {
 	}
 	_, err := x.op("human", "plan.item.release", PlanItemArgs{Item: "B1"})
 	wantRefusal(t, err, "plan_final")
+}
+
+func TestPlanHubSlowSubscriberDoesNotBlockOthers(t *testing.T) {
+	var h planHub
+	slow, cancelSlow := h.subscribe()
+	defer cancelSlow()
+	fast, cancelFast := h.subscribe()
+	defer cancelFast()
+	for seq := int64(1); seq <= 300; seq++ {
+		h.publish([]store.PlanEvent{{Seq: seq}})
+		select {
+		case ev, ok := <-fast:
+			if !ok || ev.Seq != seq {
+				t.Fatalf("healthy subscriber got %+v, open=%v, want %d", ev, ok, seq)
+			}
+		default:
+			t.Fatal("healthy subscriber lost an event")
+		}
+	}
+	count := 0
+	for range slow {
+		count++
+	}
+	if count != 256 {
+		t.Fatalf("lagging subscriber buffered %d events", count)
+	}
+	h.mu.Lock()
+	remaining := len(h.subs)
+	h.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("hub retained %d subscribers", remaining)
+	}
+}
+
+// The production deadline is 10 seconds. Shorten it on this test connection so
+// the test proves a writer blocked by its peer is reaped without a long sleep.
+type shortPlanWriteDeadline struct{ net.Conn }
+
+func (c shortPlanWriteDeadline) SetWriteDeadline(time.Time) error {
+	return c.Conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+}
+
+func TestPlanSubscribeBlockedWriterIsReaped(t *testing.T) {
+	x := planHarness(t)
+	server, peer := net.Pipe()
+	defer peer.Close()
+	done := make(chan struct{})
+	go func() {
+		handle(context.Background(), shortPlanWriteDeadline{server}, x.e.Ops(), x.e.Streams(), t.Logf)
+		close(done)
+	}()
+	request, _ := json.Marshal(rpc.Request{Op: "plan.subscribe", Caller: "human", Args: json.RawMessage(`{"all":true}`)})
+	if _, err := peer.Write(append(request, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	// Never read the response: the import backlog blocks the server's first write.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked stream survived its write deadline")
+	}
+	x.e.hub.mu.Lock()
+	remaining := len(x.e.hub.subs)
+	x.e.hub.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("blocked writer retained %d subscriptions", remaining)
+	}
+}
+
+func TestPlanSubscribeRestartReplaysFromCursor(t *testing.T) {
+	x := planHarness(t)
+	// /tmp keeps the Unix socket path within macOS's length limit.
+	dir, err := os.MkdirTemp("", "horch-resume-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s")
+	start := func(e *Engine) func() {
+		t.Helper()
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go Serve(ctx, ln, e)
+		return func() { cancel(); ln.Close() }
+	}
+	stop := start(x.e)
+	got := make(chan store.PlanEvent, 2)
+	streamDone := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		streamDone <- rpc.Stream(ctx, sock, "plan.subscribe", "human", PlanEventsArgs{}, func(raw json.RawMessage) error {
+			var ev store.PlanEvent
+			if err := json.Unmarshal(raw, &ev); err != nil {
+				return err
+			}
+			got <- ev
+			return nil
+		})
+	}()
+	var cursor int64
+	select {
+	case ev := <-got:
+		cursor = ev.Seq
+	case <-ctx.Done():
+		stop()
+		t.Fatal("initial stream did not deliver the backlog")
+	}
+	stop()
+	select {
+	case err := <-streamDone:
+		if !errors.Is(err, rpc.ErrLost) {
+			t.Fatalf("restart yielded %v, want ErrLost", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("shutdown did not disconnect the subscriber")
+	}
+	// A fresh engine has no prior subscribers. Events written while disconnected
+	// must still be replayed once the client reconnects to the new socket.
+	x.e = NewEngine(x.st, x.h, x.e.cfg)
+	x.e.logf = t.Logf
+	x.mustOp("human", "plan.item.hold", PlanItemArgs{Item: "B1", Reason: "during restart"}, nil)
+	stop = start(x.e)
+	defer stop()
+	finished := errors.New("received resumed event")
+	var resumed store.PlanEvent
+	err = rpc.Stream(ctx, sock, "plan.subscribe", "human", PlanEventsArgs{Since: cursor}, func(raw json.RawMessage) error {
+		if err := json.Unmarshal(raw, &resumed); err != nil {
+			return err
+		}
+		return finished
+	})
+	if !errors.Is(err, finished) || resumed.Seq <= cursor || resumed.Item != "B1" || resumed.Note != "during restart" {
+		t.Fatalf("resume = %+v, error %v", resumed, err)
+	}
 }

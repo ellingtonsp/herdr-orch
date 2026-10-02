@@ -111,7 +111,7 @@ func LoadFile(path string) (Config, error) {
 	}
 	var raw map[string]any
 	if _, err := toml.Decode(string(data), &raw); err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
+		return c, configDecodeError(path, err)
 	}
 	// Before the unknown-key check so the message is the helpful one. Never includes values.
 	if keys := secretKeys(raw, nil); len(keys) > 0 {
@@ -119,20 +119,29 @@ func LoadFile(path string) (Config, error) {
 	}
 	md, err := toml.Decode(string(data), &c)
 	if err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
+		return Config{File: path}, configDecodeError(path, err)
 	}
 	if un := md.Undecoded(); len(un) > 0 {
 		names := make([]string, len(un))
 		for i, k := range un {
 			names[i] = k.String()
 		}
-		return c, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(names, ", "))
+		return Config{File: path}, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(names, ", "))
 	}
 	c.File, c.Found = path, true
 	if err := c.Validate(); err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
+		return Config{File: path}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
+}
+
+// Decoder diagnostics can contain rejected input. Keep only the location, never values.
+func configDecodeError(path string, err error) error {
+	var pe toml.ParseError
+	if errors.As(err, &pe) {
+		return fmt.Errorf("%s: invalid TOML at line %d", path, pe.Position.Line)
+	}
+	return fmt.Errorf("%s: invalid config field type", path)
 }
 
 // secretKeys returns dotted names of keys that look like secrets, sorted.
@@ -188,10 +197,10 @@ func (c Config) Validate() error {
 	for _, r := range roles {
 		a := c.Agents[r]
 		if a.Kind != "" && !agentKinds[a.Kind] {
-			return fmt.Errorf("agents.%s.kind %q: want claude, codex or pi", r, a.Kind)
+			return fmt.Errorf("agents.%s.kind: want claude, codex or pi", r)
 		}
 		if a.Effort != "" && !efforts[a.Effort] {
-			return fmt.Errorf("agents.%s.effort %q: want low, medium, high or xhigh", r, a.Effort)
+			return fmt.Errorf("agents.%s.effort: want low, medium, high or xhigh", r)
 		}
 	}
 	if c.Slots.Local < 0 || c.Slots.IOS < 0 {
@@ -202,7 +211,7 @@ func (c Config) Validate() error {
 	}
 	if c.DefaultProject != "" {
 		if _, ok := c.Projects[c.DefaultProject]; !ok {
-			return fmt.Errorf("default_project %q is not defined under [projects]", c.DefaultProject)
+			return errors.New("default_project is not defined under [projects]")
 		}
 	}
 	return nil

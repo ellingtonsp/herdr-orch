@@ -171,6 +171,11 @@ var migrations = []string{
 		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;
 	CREATE TRIGGER plan_events_no_delete BEFORE DELETE ON plan_events
 		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
+	// 4: SQLite REPLACE deletes conflicting rows without firing delete triggers
+	// unless recursive_triggers is enabled. Reject collisions before that delete.
+	`CREATE TRIGGER plan_events_no_replace BEFORE INSERT ON plan_events
+		WHEN EXISTS(SELECT 1 FROM plan_events WHERE seq=NEW.seq)
+		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
 }
 
 func (s *Store) migrate() error {

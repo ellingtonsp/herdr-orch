@@ -74,6 +74,7 @@ func (e *Engine) userConfig() config.Config {
 	c, err := e.cfg.UserConfig()
 	if err != nil {
 		e.logf("config: %v", err)
+		return config.Config{}
 	}
 	return c
 }
@@ -471,21 +472,23 @@ func (e *Engine) opPlanExport(_ context.Context, caller string, raw json.RawMess
 	if a.Format != "md" && a.Format != "json" {
 		return nil, refusal("bad_args", "--format must be md or json")
 	}
+	// Keep finalization and its snapshot together with respect to daemon writes;
+	// the store snapshot also protects against independent SQLite connections.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	p, err := e.planFor(a.PlanRef)
 	if err != nil {
 		return nil, err
 	}
 	if a.Finalize && p.Status != store.PlanFinal {
 		act := e.actor(caller, a.Principal)
-		if _, err := e.planWrite(func() (store.PlanWrite, error) { return e.st.SetPlanStatus(p.ID, store.PlanFinal, 0, act) }); err != nil {
+		w, err := e.st.SetPlanStatus(p.ID, store.PlanFinal, 0, act)
+		if err != nil {
 			return nil, err
 		}
+		e.afterPlanWriteLocked(w)
 	}
-	v, err := e.st.GetPlanView(p.ID)
-	if err != nil {
-		return nil, err
-	}
-	evs, err := e.st.PlanEvents(p.ID, 0, 1<<30)
+	v, evs, err := e.st.GetPlanSnapshot(p.ID)
 	if err != nil {
 		return nil, err
 	}

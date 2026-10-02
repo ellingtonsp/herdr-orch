@@ -74,6 +74,7 @@ func Parse(md string) (store.PlanSeed, []string, error) {
 	}
 
 	items := map[string]*store.PlanItem{}
+	complete := map[string]bool{}
 	var order []string
 	get := func(id string, listed bool) *store.PlanItem {
 		if it, ok := items[id]; ok {
@@ -119,6 +120,15 @@ func Parse(md string) (store.PlanSeed, []string, error) {
 					return seed, warn, fmt.Errorf("item %s appears twice in %q", id, s.heading)
 				}
 				it := get(id, true)
+				// Exports carry complete canonical rows alongside the readable projection.
+				// JSON preserves held-from, unlisted rows, ordering and multiline fields.
+				if details := c("details"); details != "" {
+					if err := json.Unmarshal([]byte(details), it); err != nil || it.ID != id {
+						return seed, warn, fmt.Errorf("item %s: invalid details", id)
+					}
+					complete[id] = true
+					continue
+				}
 				it.Issues = splitIssues(c("issues"))
 				it.Kind, it.Lane, it.Model = c("kind"), c("lane"), c("model")
 				it.PR, it.DispatchRef = c("pr"), c("dispatch ref")
@@ -163,6 +173,9 @@ func Parse(md string) (store.PlanSeed, []string, error) {
 		if r[0] == "" {
 			continue
 		}
+		if complete[r[0]] {
+			continue
+		}
 		it := get(r[0], true)
 		if !it.Listed {
 			it.Listed = true
@@ -177,6 +190,9 @@ func Parse(md string) (store.PlanSeed, []string, error) {
 		}
 	}
 	for _, r := range whyRows {
+		if complete[r[0]] {
+			continue
+		}
 		it, ok := items[r[0]]
 		if !ok {
 			warn = append(warn, fmt.Sprintf("why: no item %s; kept as an item", r[0]))
@@ -185,6 +201,9 @@ func Parse(md string) (store.PlanSeed, []string, error) {
 		it.Why = r[1]
 	}
 	for _, r := range heldRows {
+		if complete[r[0]] {
+			continue
+		}
 		if r[0] == "" {
 			continue
 		}
@@ -308,7 +327,7 @@ func Render(v store.PlanView, events []store.PlanEvent) string {
 			parts = append(parts, joinNonEmpty("## "+s.Heading, s.Body))
 		default:
 			have[s.Kind] = true
-			parts = append(parts, joinNonEmpty("## "+s.Heading, renderKind(v, s.Kind)))
+			parts = append(parts, joinNonEmpty("## "+s.Heading, renderKind(v, s.Kind, events != nil)))
 		}
 	}
 	if len(v.Plan.Sections) == 0 {
@@ -316,7 +335,7 @@ func Render(v store.PlanView, events []store.PlanEvent) string {
 	}
 	for _, k := range []struct{ kind, heading string }{{What, "What"}, {Why, "Why"}, {Decisions, "Decisions"}, {Held, "Held on purpose"}, {Items, "Items"}} {
 		if !have[k.kind] {
-			if body := renderKind(v, k.kind); body != "" {
+			if body := renderKind(v, k.kind, events != nil); body != "" {
 				parts = append(parts, "## "+k.heading+"\n"+body)
 			}
 		}
@@ -334,18 +353,28 @@ func joinNonEmpty(head, body string) string {
 	return head + "\n" + body
 }
 
-func renderKind(v store.PlanView, kind string) string {
+func renderKind(v store.PlanView, kind string, complete bool) string {
 	var b strings.Builder
 	row := func(cells ...string) {
 		writeCells(&b, cells)
 	}
 	switch kind {
 	case Items:
-		row("id", "issues", "kind", "lane", "model", "state", "PR", "dispatch ref")
-		b.WriteString("|---|---|---|---|---|---|---|---|\n")
+		head := []string{"id", "issues", "kind", "lane", "model", "state", "PR", "dispatch ref"}
+		if complete {
+			head = append(head, "details")
+		}
+		row(head...)
+		b.WriteString("|" + strings.Repeat("---|", len(head)) + "\n")
 		for _, it := range v.Items {
-			if it.Listed {
-				row(it.ID, joinIssues(it.Issues), it.Kind, it.Lane, it.Model, it.State, it.PR, it.DispatchRef)
+			if it.Listed || complete {
+				cells := []string{it.ID, joinIssues(it.Issues), it.Kind, it.Lane, it.Model, it.State, it.PR, it.DispatchRef}
+				if complete {
+					it.Version, it.CreatedAt, it.UpdatedAt = 0, 0, 0
+					details, _ := json.Marshal(it)
+					cells = append(cells, string(details))
+				}
+				row(cells...)
 			}
 		}
 	case What:
@@ -363,7 +392,11 @@ func renderKind(v store.PlanView, kind string) string {
 	case Why:
 		for _, it := range v.Items {
 			if it.Why != "" {
-				fmt.Fprintf(&b, "- **%s** — %s\n", it.ID, it.Why)
+				why := it.Why
+				if complete {
+					why = strings.ReplaceAll(strings.ReplaceAll(why, "\r", " "), "\n", " ")
+				}
+				fmt.Fprintf(&b, "- **%s** — %s\n", it.ID, why)
 			}
 		}
 	case Decisions:

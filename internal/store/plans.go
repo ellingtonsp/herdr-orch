@@ -197,7 +197,31 @@ func (s *Store) FindPlan(project, day string) (Plan, error) {
 	return p, err
 }
 
-func (s *Store) GetPlanView(id string) (PlanView, error) { return planView(s.db, id) }
+func (s *Store) GetPlanView(id string) (PlanView, error) {
+	var v PlanView
+	err := s.tx(func(tx *sql.Tx) error {
+		var err error
+		v, err = planView(tx, id)
+		return err
+	})
+	return v, err
+}
+
+// GetPlanSnapshot reads plan content and its complete event log from one SQLite
+// snapshot, so an export cannot combine content and events from different versions.
+func (s *Store) GetPlanSnapshot(id string) (PlanView, []PlanEvent, error) {
+	var v PlanView
+	var events []PlanEvent
+	err := s.tx(func(tx *sql.Tx) error {
+		var err error
+		if v, err = planView(tx, id); err != nil {
+			return err
+		}
+		events, err = planEvents(tx, id, 0, 1<<30)
+		return err
+	})
+	return v, events, err
+}
 
 func planView(q querier, id string) (PlanView, error) {
 	var v PlanView
@@ -251,6 +275,10 @@ func getItem(q querier, plan, id string) (PlanItem, error) {
 
 // PlanEvents returns events with seq > since, oldest first; plan "" means every plan.
 func (s *Store) PlanEvents(plan string, since int64, limit int) ([]PlanEvent, error) {
+	return planEvents(s.db, plan, since, limit)
+}
+
+func planEvents(qr querier, plan string, since int64, limit int) ([]PlanEvent, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -260,7 +288,7 @@ func (s *Store) PlanEvents(plan string, since int64, limit int) ([]PlanEvent, er
 		q += ` AND plan_id=?`
 		args = append(args, plan)
 	}
-	rows, err := s.db.Query(q+` ORDER BY seq LIMIT ?`, append(args, limit)...)
+	rows, err := qr.Query(q+` ORDER BY seq LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -398,10 +426,12 @@ func (pt *planTx) item(id string, ifVersion int64) (PlanItem, error) {
 	return it, nil
 }
 
-// renumber stores positions 1..n in the given order.
+// renumber stores positions 1..n in the given order. Displaced items advance their
+// versions too: a previously read item position must not authorize a stale move.
 func (pt *planTx) renumber(ids []string) error {
+	now := pt.s.now()
 	for i, id := range ids {
-		if _, err := pt.tx.Exec(`UPDATE plan_items SET position=? WHERE plan_id=? AND id=?`, i+1, pt.plan.ID, id); err != nil {
+		if _, err := pt.tx.Exec(`UPDATE plan_items SET position=?,version=version+1,updated_at=? WHERE plan_id=? AND id=? AND position<>?`, i+1, now, pt.plan.ID, id, i+1); err != nil {
 			return err
 		}
 	}
@@ -541,6 +571,9 @@ func (s *Store) AddItem(plan string, it PlanItem, position int, ifPlanVersion in
 	}
 	if err := validState(it.State); err != nil {
 		return PlanWrite{}, err
+	}
+	if it.State == ItemHeld {
+		return PlanWrite{}, refuse("bad_state", "use `horch plan item hold` to hold an item")
 	}
 	it.Listed = true
 	return s.writePlan(plan, ifPlanVersion, a, func(pt *planTx) error {
