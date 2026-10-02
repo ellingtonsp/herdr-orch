@@ -57,6 +57,7 @@ func (e *Engine) Ops() map[string]Handler {
 		"schedule.run":    e.opScheduleRun,
 		"schedule.enable": e.opScheduleEnable,
 		"board":           e.opBoard,
+		"web.activity":    e.opWebActivity,
 
 		"plan.import":       e.opPlanImport,
 		"plan.show":         e.opPlanShow,
