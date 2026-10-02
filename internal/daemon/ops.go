@@ -57,6 +57,31 @@ func (e *Engine) Ops() map[string]Handler {
 		"schedule.run":    e.opScheduleRun,
 		"schedule.enable": e.opScheduleEnable,
 		"board":           e.opBoard,
+
+		"plan.import":       e.opPlanImport,
+		"plan.show":         e.opPlanShow,
+		"plan.item.add":     e.planItemOp("add"),
+		"plan.item.update":  e.planItemOp("update"),
+		"plan.item.move":    e.planItemOp("move"),
+		"plan.item.hold":    e.planItemOp("hold"),
+		"plan.item.release": e.planItemOp("release"),
+		"plan.item.remove":  e.planItemOp("remove"),
+		"plan.transition":   e.planItemOp("transition"),
+		"plan.status":       e.opPlanStatus,
+		"plan.events":       e.opPlanEvents,
+		"plan.export":       e.opPlanExport,
+		"plan.config":       e.opPlanConfig,
+	}
+}
+
+// StreamHandler serves a streaming op: it calls send once per result line until it
+// returns (or the client hangs up).
+type StreamHandler func(ctx context.Context, caller string, args json.RawMessage, send func(any) error) error
+
+// Streams returns the streaming ops served on orch.sock.
+func (e *Engine) Streams() map[string]StreamHandler {
+	return map[string]StreamHandler{
+		"plan.subscribe": e.streamPlanEvents,
 	}
 }
 

@@ -104,7 +104,7 @@ func Run(ctx context.Context, o Options) error {
 		return map[string]any{"pid": os.Getpid()}, nil
 	}
 
-	go serve(ctx, ln, ops, logf)
+	go serve(ctx, ln, ops, e.Streams(), logf)
 	go watchOwnership(ctx, lock, p.Sock, logf, cancel)
 
 	// 3. Rebuild the watch set from the store, then follow herdr.
@@ -210,7 +210,7 @@ func sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
-func serve(ctx context.Context, ln net.Listener, ops map[string]Handler, logf func(string, ...any)) {
+func serve(ctx context.Context, ln net.Listener, ops map[string]Handler, streams map[string]StreamHandler, logf func(string, ...any)) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -221,11 +221,11 @@ func serve(ctx context.Context, ln net.Listener, ops map[string]Handler, logf fu
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		go handle(ctx, conn, ops, logf)
+		go handle(ctx, conn, ops, streams, logf)
 	}
 }
 
-func handle(ctx context.Context, conn net.Conn, ops map[string]Handler, logf func(string, ...any)) {
+func handle(ctx context.Context, conn net.Conn, ops map[string]Handler, streams map[string]StreamHandler, logf func(string, ...any)) {
 	defer conn.Close()
 	r := bufio.NewReaderSize(conn, 1<<20)
 	line, err := r.ReadBytes('\n')
@@ -236,6 +236,9 @@ func handle(ctx context.Context, conn net.Conn, ops map[string]Handler, logf fun
 	resp := rpc.Response{}
 	if err := json.Unmarshal(line, &req); err != nil {
 		resp.Error = &rpc.Error{Code: "bad_request", Message: err.Error()}
+	} else if sh, ok := streams[req.Op]; ok {
+		stream(ctx, conn, req, sh, logf)
+		return
 	} else if h, ok := ops[req.Op]; !ok {
 		resp.Error = &rpc.Error{Code: "unknown_op", Message: "unknown op " + req.Op}
 	} else {
@@ -270,6 +273,51 @@ func handle(ctx context.Context, conn net.Conn, ops map[string]Handler, logf fun
 			resp.OK = true
 			resp.Result, _ = json.Marshal(out)
 		}
+	}
+	b, _ := json.Marshal(resp)
+	_, _ = conn.Write(append(b, '\n'))
+}
+
+// Serve answers requests on ln with e's ops until ctx ends (tests and embedders; Run does
+// the same with the session lock and herdr subscription around it).
+func Serve(ctx context.Context, ln net.Listener, e *Engine) {
+	serve(ctx, ln, e.Ops(), e.Streams(), e.logf)
+}
+
+// stream serves a streaming op: one {"ok":true,"result":...} line per item, then a final
+// error line if the handler stops for any reason other than the client hanging up.
+func stream(ctx context.Context, conn net.Conn, req rpc.Request, h StreamHandler, logf func(string, ...any)) {
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+		cancel()
+	}()
+	caller := req.Caller
+	if caller == "" {
+		caller = "human"
+	}
+	send := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		out, _ := json.Marshal(rpc.Response{OK: true, Result: b})
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_, err = conn.Write(append(out, '\n'))
+		return err
+	}
+	err := h(cctx, caller, req.Args, send)
+	if err == nil || cctx.Err() != nil {
+		return
+	}
+	resp := rpc.Response{}
+	if ref, ok := AsRefusal(err); ok {
+		resp.Error = &rpc.Error{Code: ref.Code, Message: ref.Message}
+	} else {
+		logf("stream %s: %v", req.Op, err)
+		resp.Error = &rpc.Error{Code: "error", Message: err.Error()}
 	}
 	b, _ := json.Marshal(resp)
 	_, _ = conn.Write(append(b, '\n'))

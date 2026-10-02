@@ -4,6 +4,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -47,6 +48,9 @@ var idempotent = map[string]bool{
 	"run.current": true, "run.list": true, "run.show": true,
 	"task.list": true, "task.show": true, "dispatch.show": true, "gate.list": true,
 	"worker.show": true, "worker.list": true, "worker.read": true, "schedule.list": true,
+	"plan.show": true, "plan.events": true, "plan.config": true,
+	// Re-importing the same file is a no-op; a different file needs --replace either way.
+	"plan.import": true,
 }
 
 // Call runs op, starting the daemon first if its socket is dead. A request that never
@@ -66,6 +70,18 @@ func (c *Client) Call(ctx context.Context, op string, args, out any) error {
 		return &rpc.Error{Code: "outcome_unknown", Message: lostAdvice(op)}
 	}
 	return rpc.Call(ctx, c.Paths.Sock, op, c.Caller, args, out)
+}
+
+// Stream runs a streaming op, starting the daemon first if its socket is dead.
+func (c *Client) Stream(ctx context.Context, op string, args any, fn func(json.RawMessage) error) error {
+	err := rpc.Stream(ctx, c.Paths.Sock, op, c.Caller, args, fn)
+	if !errors.Is(err, rpc.ErrUnavailable) {
+		return err
+	}
+	if err := c.ensureDaemon(ctx); err != nil {
+		return err
+	}
+	return rpc.Stream(ctx, c.Paths.Sock, op, c.Caller, args, fn)
 }
 
 func lostAdvice(op string) string {

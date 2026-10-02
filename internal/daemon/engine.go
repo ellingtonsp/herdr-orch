@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ellingtonsp/herdr-orch/internal/config"
 	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 )
@@ -49,6 +50,9 @@ type Config struct {
 	HorchBin string
 	// HerdrSock is the herdr session socket, pinned in worker prompts.
 	HerdrSock string
+	// UserConfig loads ~/.config/horch/config.toml (owner principal, default project). It
+	// is read on each plan write, so edits apply without a daemon restart.
+	UserConfig func() (config.Config, error)
 }
 
 func DefaultConfig() Config {
@@ -56,6 +60,7 @@ func DefaultConfig() Config {
 		IdleReportAfter: 3 * time.Minute,
 		UnobservedAfter: 90 * time.Second,
 		BlockedAfter:    20 * time.Second,
+		UserConfig:      config.Load,
 	}
 }
 
@@ -65,6 +70,7 @@ type Engine struct {
 	h      Herdr
 	cfg    Config
 	notify notifier
+	hub    planHub
 	logf   func(string, ...any)
 
 	status      map[string]string    // pane → last known agent status

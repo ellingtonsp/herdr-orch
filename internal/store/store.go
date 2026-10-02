@@ -142,6 +142,35 @@ var migrations = []string{
 	ALTER TABLE dispatches ADD COLUMN nudges INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE runs ADD COLUMN idle_report_ms INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE runs ADD COLUMN idle_flag_ms INTEGER NOT NULL DEFAULT 0;`,
+	// 3: day-plan store (plans.go). plan_events is append-only.
+	`CREATE TABLE plans(
+		id TEXT PRIMARY KEY, day TEXT NOT NULL, project TEXT NOT NULL,
+		published_ref TEXT NOT NULL DEFAULT '', source_hash TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL, coordinator TEXT NOT NULL DEFAULT '', sections TEXT NOT NULL DEFAULT '[]',
+		version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+		UNIQUE(day, project));
+	CREATE TABLE plan_items(
+		plan_id TEXT NOT NULL REFERENCES plans(id), id TEXT NOT NULL, position INTEGER NOT NULL,
+		issues TEXT NOT NULL DEFAULT '[]', kind TEXT NOT NULL DEFAULT '', lane TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, pr TEXT NOT NULL DEFAULT '',
+		dispatch_ref TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', what TEXT NOT NULL DEFAULT '{}',
+		why TEXT NOT NULL DEFAULT '', held INTEGER NOT NULL DEFAULT 0, held_reason TEXT NOT NULL DEFAULT '',
+		held_from TEXT NOT NULL DEFAULT '', listed INTEGER NOT NULL DEFAULT 1,
+		version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+		PRIMARY KEY(plan_id, id));
+	CREATE TABLE plan_decisions(
+		plan_id TEXT NOT NULL REFERENCES plans(id), position INTEGER NOT NULL,
+		title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', PRIMARY KEY(plan_id, position));
+	CREATE TABLE plan_events(
+		seq INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT NOT NULL, ts INTEGER NOT NULL,
+		actor TEXT NOT NULL, actor_kind TEXT NOT NULL, principal TEXT NOT NULL DEFAULT '',
+		approval INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL, item TEXT NOT NULL DEFAULT '',
+		note TEXT NOT NULL DEFAULT '', before TEXT, after TEXT, plan_version INTEGER NOT NULL);
+	CREATE INDEX plan_events_plan ON plan_events(plan_id, seq);
+	CREATE TRIGGER plan_events_no_update BEFORE UPDATE ON plan_events
+		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;
+	CREATE TRIGGER plan_events_no_delete BEFORE DELETE ON plan_events
+		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
 }
 
 func (s *Store) migrate() error {
