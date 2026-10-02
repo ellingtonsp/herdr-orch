@@ -70,13 +70,16 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// Header identity is trusted only behind tailscale serve (see README). The
+// Header identity is trusted only behind the configured proxy (see README). The
 // explicit local exception is limited to loopback peers, even on a wider bind.
 func (s *Server) identity(r *http.Request) (string, bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(host)
 	loopback := err == nil && ip != nil && ip.IsLoopback()
-	values := r.Header.Values("Tailscale-User-Login")
+	var values []string
+	if s.cfg.IdentityHeader != "" {
+		values = r.Header.Values(s.cfg.IdentityHeader)
+	}
 	if len(values) > 0 {
 		if !loopback || len(values) != 1 {
 			return "", false

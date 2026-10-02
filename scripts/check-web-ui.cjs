@@ -75,7 +75,7 @@ const fs = require('node:fs');
   assert.deepEqual(errors,[],'browser errors');
   await context.close();
   // A reachable non-owner can read, but edit controls and writes are refused.
-  const reader = await browser.newContext({extraHTTPHeaders:{'Tailscale-User-Login':'guest'}});
+  const reader = await browser.newContext({extraHTTPHeaders:{'X-Remote-User':'guest'}});
   const readPage = await reader.newPage();
   await readPage.goto(base);
   await readPage.locator('#access').filter({hasText:'Read only'}).waitFor();

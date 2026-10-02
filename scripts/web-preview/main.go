@@ -107,5 +107,5 @@ func run() error {
 	}
 	defer ln.Close()
 	fmt.Printf("http://%s\n", ln.Addr())
-	return web.Serve(ctx, ln, web.New(client, config.Web{OwnerPrincipal: "you", AllowLocalWrites: true}))
+	return web.Serve(ctx, ln, web.New(client, config.Web{OwnerPrincipal: "you", IdentityHeader: "X-Remote-User", AllowLocalWrites: true}))
 }

@@ -269,38 +269,45 @@ principal = "you@example.com"
 [web]
 listen = "127.0.0.1:7171"
 owner_principal = "you@example.com"
+identity_header = "X-Remote-User"
 allow_local_writes = false
 ```
 
 `listen` defaults to `127.0.0.1:7171`; `owner_principal` defaults to
-`owner.principal`; local writes default to false. Use your actual Tailscale login
-in your own config. Keep the two principals equal if web edits should count as
-owner approvals. These are preferences, with no secrets in the file.
+`owner.principal`; local writes default to false. `identity_header` has no default:
+set it to the authenticated user header injected by your trusted reverse proxy.
+Use your own login as the owner in your local config. Keep the two principals
+equal if web edits should count as owner approvals. These are preferences, with
+no secrets in the file.
 
-Reads are available to anyone who can reach the listener. Writes require an exact
-match between `Tailscale-User-Login` and `web.owner_principal`. Identity headers
-are accepted only from loopback peers, where the trusted proxy connects. A
-missing header refuses writes unless `allow_local_writes = true`, which allows
-only loopback connections to act as the configured owner. A guest or empty header
-never falls back to local access. JSON and same-origin checks protect edits from
-cross-site submissions.
+Reads are available to anyone who can reach the listener. Writes require a
+configured `identity_header` whose value exactly matches `web.owner_principal`.
+Headers are accepted only from loopback peers, where the trusted proxy connects.
+An unconfigured or missing header refuses writes unless `allow_local_writes = true`,
+which allows plain loopback connections to act as the configured owner. A guest,
+empty or repeated identity header never falls back to local access. JSON and
+same-origin checks protect edits from cross-site submissions.
 
 To expose the page only inside your tailnet, keep the HTTP bind on loopback and
-run these in separate terminals:
+use a reverse proxy or tailnet proxy that injects an authenticated user header:
 
 ```sh
-horch web
-tailscale serve --bg http://127.0.0.1:7171
-tailscale serve status
+horch web --listen 127.0.0.1:7171
 ```
 
-Open the HTTPS tailnet URL printed by Serve. Tailscale Serve injects login headers
-and strips incoming identity headers to prevent spoofing; see
-[Tailscale Serve identity headers](https://tailscale.com/docs/features/tailscale-serve#identity-headers).
-Use Serve, not public Funnel. Loopback access is a trust boundary: other local
-processes can send headers, so this is intended for a trusted single-user host.
-Binding a wider address exposes reads; direct network peers cannot authorize
-writes by supplying an identity header.
+Configure that proxy with an HTTPS listener reachable only on your private
+network, upstream `http://127.0.0.1:7171`, and an identity header such as
+`X-Remote-User`. The proxy must authenticate the requester, strip any incoming
+copy of the identity header, then set the header to the verified user's login.
+Set `web.identity_header` to the exact header name your proxy injects and
+`web.owner_principal` to the owner's verified login. Leave local writes disabled
+when accessing the page through the proxy. No proxy credentials belong in the
+horch config.
+
+Open the proxy's private HTTPS URL. Loopback access is a trust boundary: other
+local processes can send headers, so this is intended for a trusted single-user
+host. Binding a wider address exposes reads; direct network peers cannot
+authorize writes by supplying an identity header.
 
 ### JSON API
 

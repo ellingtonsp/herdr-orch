@@ -39,6 +39,7 @@ type Config struct {
 type Web struct {
 	Listen           string `toml:"listen" json:"listen"`
 	OwnerPrincipal   string `toml:"owner_principal" json:"owner_principal"`
+	IdentityHeader   string `toml:"identity_header" json:"identity_header"`
 	AllowLocalWrites bool   `toml:"allow_local_writes" json:"allow_local_writes"`
 }
 
@@ -223,6 +224,11 @@ var (
 
 // Validate checks enum values, ranges, and that DefaultProject exists.
 func (c Config) Validate() error {
+	for _, ch := range c.Web.IdentityHeader {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", ch)) {
+			return errors.New("web.identity_header: want an HTTP header name")
+		}
+	}
 	if err := ValidateWebListen(c.WebSettings().Listen); err != nil {
 		return err
 	}

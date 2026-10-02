@@ -67,7 +67,7 @@ func setup(t *testing.T, local bool) *harness {
 	if err := c.Call(cctx, "plan.import", "human", daemon.PlanImportArgs{PlanRef: daemon.PlanRef{Day: "2026-03-14"}, Markdown: string(md)}, nil); err != nil {
 		t.Fatal(err)
 	}
-	s := New(c, config.Web{OwnerPrincipal: "you", AllowLocalWrites: local})
+	s := New(c, config.Web{OwnerPrincipal: "you", IdentityHeader: "X-Remote-User", AllowLocalWrites: local})
 	s.poll = 20 * time.Millisecond
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
@@ -90,7 +90,7 @@ func request(t *testing.T, h *harness, path, principal string, args any) (int, [
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if principal != "" {
-		req.Header.Set("Tailscale-User-Login", principal)
+		req.Header.Set("X-Remote-User", principal)
 	}
 	res, err := h.http.Client().Do(req)
 	if err != nil {
@@ -150,7 +150,7 @@ func TestOwnerWritesAndVersions(t *testing.T) {
 	first := current(t, h)
 	hold := argsFor(t, first, "B1")
 	hold.Reason = "Waiting for review"
-	for _, identity := range []string{"", "guest"} {
+	for _, identity := range []string{"", "guest", " "} {
 		status, b := request(t, h, "/api/plan/items/hold", identity, hold)
 		if status != 403 {
 			t.Fatalf("identity %q: %d %s", identity, status, b)
@@ -248,16 +248,23 @@ func TestLocalWritesAndProxyIdentity(t *testing.T) {
 		}
 	}
 	req := httptest.NewRequest("GET", "/api/identity", nil)
-	req.Header.Add("Tailscale-User-Login", "you")
-	req.Header.Add("Tailscale-User-Login", "guest")
+	req.Header.Add("X-Remote-User", "you")
+	req.Header.Add("X-Remote-User", "guest")
 	if _, allowed := h.server.identity(req); allowed {
 		t.Fatal("duplicate identity accepted")
 	}
 	network := httptest.NewRequest("GET", "/api/identity", nil)
 	network.RemoteAddr = "192.0.2.1:9000"
-	network.Header.Set("Tailscale-User-Login", "you")
+	network.Header.Set("X-Remote-User", "you")
 	if _, allowed := h.server.identity(network); allowed {
 		t.Fatal("network peer spoofed proxy identity")
+	}
+	h.server.cfg.IdentityHeader = ""
+	h.server.cfg.AllowLocalWrites = false
+	req.RemoteAddr = "127.0.0.1:9000"
+	req.Header.Set("X-Remote-User", "you")
+	if _, allowed := h.server.identity(req); allowed {
+		t.Fatal("unconfigured identity header accepted")
 	}
 	h.server.cfg.OwnerPrincipal = ""
 	if _, allowed := h.server.identity(httptest.NewRequest("GET", "/api/identity", nil)); allowed {

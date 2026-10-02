@@ -65,7 +65,9 @@ keychain_service = "horch-linear"    # optional
 
 [web]
 listen = "127.0.0.1:7171"
-# Match the Tailscale login injected by tailscale serve. Defaults to owner.principal.
+# Match the authenticated login supplied by your trusted proxy. Defaults to owner.principal.
 owner_principal = "you"
+# No default: configure the header your proxy injects after authenticating a user.
+identity_header = "X-Remote-User"
 # Opt in only for edits from a plain loopback connection without an identity header.
 allow_local_writes = false
