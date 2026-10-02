@@ -87,10 +87,25 @@ func (s *Server) identity(r *http.Request) (string, bool) {
 		principal := strings.TrimSpace(values[0])
 		return principal, principal != "" && s.cfg.OwnerPrincipal != "" && principal == s.cfg.OwnerPrincipal
 	}
-	if loopback && s.cfg.AllowLocalWrites && s.cfg.OwnerPrincipal != "" {
+	// Plain-loopback writes also need a loopback Host: a DNS-rebinding page is
+	// same-origin with its own hostname, so Origin/Fetch-Site checks cannot catch it.
+	if loopback && s.cfg.AllowLocalWrites && s.cfg.OwnerPrincipal != "" && loopbackHost(r.Host) {
 		return s.cfg.OwnerPrincipal, true
 	}
 	return "", false
+}
+
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 func ref(r *http.Request) daemon.PlanRef {
 	return daemon.PlanRef{Project: r.URL.Query().Get("project"), Day: r.URL.Query().Get("day")}

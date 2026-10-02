@@ -284,7 +284,7 @@ Reads are available to anyone who can reach the listener. Writes require a
 configured `identity_header` whose value exactly matches `web.owner_principal`.
 Headers are accepted only from loopback peers, where the trusted proxy connects.
 An unconfigured or missing header refuses writes unless `allow_local_writes = true`,
-which allows plain loopback connections to act as the configured owner. A guest,
+which allows plain loopback connections (with a `localhost`/loopback `Host`, to defeat DNS rebinding) to act as the configured owner. Never enable it when a proxy forwards unauthenticated requests to the listener. A guest,
 empty or repeated identity header never falls back to local access. JSON and
 same-origin checks protect edits from cross-site submissions.
 

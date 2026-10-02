@@ -242,6 +242,7 @@ func TestLocalWritesAndProxyIdentity(t *testing.T) {
 	for _, peer := range []string{"192.0.2.1:9000", "[::1]:9000", "127.0.0.1:9000"} {
 		req := httptest.NewRequest("GET", "/api/identity", nil)
 		req.RemoteAddr = peer
+		req.Host = "127.0.0.1:7171"
 		_, allowed := h.server.identity(req)
 		if allowed != (peer != "192.0.2.1:9000") {
 			t.Fatalf("peer %s: %v", peer, allowed)
@@ -432,5 +433,31 @@ func TestUnavailableDaemon(t *testing.T) {
 		if out.Code != 503 {
 			t.Fatalf("unavailable: %d", out.Code)
 		}
+	}
+}
+
+func TestLocalWritesRefuseRebindingHost(t *testing.T) {
+	h := setup(t, true)
+	a := argsFor(t, current(t, h), "B1")
+	a.Reason = "Synthetic wait"
+	data, _ := json.Marshal(a)
+	for host, want := range map[string]int{"evil.example:7171": 403, "localhost:7171": 200} {
+		req, _ := http.NewRequest("POST", h.http.URL+"/api/plan/items/hold", bytes.NewReader(data))
+		req.Host = host
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://"+host) // same-origin from the rebound page's view
+		res, err := h.http.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != want {
+			t.Fatalf("host %s: %d, want %d", host, res.StatusCode, want)
+		}
+		if want == 200 {
+			continue
+		}
+		a = argsFor(t, current(t, h), "B1")
+		data, _ = json.Marshal(a)
 	}
 }
