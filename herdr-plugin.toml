@@ -1,0 +1,57 @@
+id = "herdr-orch"
+name = "herdr-orch"
+version = "0.1.1"
+min_herdr_version = "0.9.1"
+description = "Orchestrate coding agents across panes: mailbox, blocking ask/reply, tasks with dependencies, tracked dispatch, decision gates, verified worker release, schedules. CLI: horch."
+platforms = ["macos", "linux"]
+
+# `herdr plugin install` runs this: it downloads the prebuilt herdr-orch and horch binaries for
+# your OS/arch from the matching GitHub release (SHA-256 verified) into ./bin, and builds from
+# source only when there is no match (needs Go). `herdr plugin link` skips it: run `make build`.
+[[build]]
+platforms = ["macos", "linux"]
+command = ["/bin/sh", "scripts/fetch-or-build.sh"]
+
+# One daemon per herdr session: follows agent status events, owns the SQLite store, serves the
+# horch socket. It takes over from an older copy and exits on its own when herdr goes away.
+[[startup]]
+command = ["./bin/herdr-orch", "daemon"]
+
+[[panes]]
+id = "board"
+title = "horch board"
+placement = "split"
+command = ["./bin/herdr-orch", "board"]
+
+[[panes]]
+id = "gate"
+title = "horch gates"
+placement = "popup"
+width = 90
+height = 24
+command = ["./bin/herdr-orch", "gate"]
+
+[[actions]]
+id = "board"
+title = "Orchestration: open board"
+contexts = ["workspace"]
+command = ["./bin/herdr-orch"]
+
+[[actions]]
+id = "gate"
+title = "Orchestration: resolve gate"
+contexts = ["workspace"]
+command = ["./bin/herdr-orch"]
+
+[[actions]]
+id = "dispatch-next"
+title = "Orchestration: dispatch next ready task"
+contexts = ["workspace"]
+command = ["./bin/herdr-orch"]
+
+# Puts `horch` on PATH (symlink in ~/.local/bin) so agents and you can run it.
+[[actions]]
+id = "install-cli"
+title = "Orchestration: install horch CLI"
+contexts = ["workspace"]
+command = ["./bin/herdr-orch"]
