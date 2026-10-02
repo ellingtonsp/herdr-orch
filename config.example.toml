@@ -1,0 +1,64 @@
+# horch config. Install:
+#
+#   mkdir -p ~/.config/horch && cp config.example.toml ~/.config/horch/config.toml
+#
+# Location: $HORCH_CONFIG if set, else $XDG_CONFIG_HOME/horch/config.toml (absolute
+# XDG_CONFIG_HOME only), else ~/.config/horch/config.toml. A missing file is fine; horch
+# runs with defaults and the settings screen asks for what is missing. Unknown keys are errors.
+
+# Project used when a command does not name one. Must exist under [projects].
+default_project = "myapp"
+
+[owner]
+# Plan edits made as this principal (HORCH_PRINCIPAL / --principal, or a terminal outside
+# herdr) count as the owner's approval. Orchestrator and worker writes never do.
+principal = "you"
+# name  = "Your Name"           # display name
+# email = "you@example.com"     # git author for exports
+
+# Default agent per role. kind: claude | codex | pi. effort (codex): low | medium | high | xhigh.
+[agents.build]
+kind  = "claude"
+model = "claude-sonnet-5-5"
+
+[agents.review]
+kind   = "codex"
+model  = ""       # empty: codex's own default model
+effort = "high"
+
+[agents.security_review]
+kind  = "claude"
+model = "claude-opus-5-5"
+
+[agents.ux_review]
+kind  = "claude"
+model = "claude-opus-5-5"
+
+[agents.orchestrator]
+kind  = "claude"
+model = "claude-opus-5-5"
+
+[slots]
+local            = 3   # concurrent local workers
+ios              = 1   # concurrent iOS simulator/build workers
+min_free_ram_pct = 30  # 0..100; do not start more work below this much free RAM
+
+# One table per repo. "<date>" is replaced with the plan day (YYYY-MM-DD).
+[projects.myapp]
+repo           = "you/myapp"
+plan_path      = "docs/orchestration/<date>.plan.md"
+day_log_branch = "orchestration/<date>"
+
+[integrations.linear]
+team = "ENG"   # your Linear team key; omit the section if you do not use Linear
+
+# !!! SECRETS NEVER GO IN THIS FILE !!!
+# The Linear API key comes ONLY from the environment or the macOS Keychain. A key, token,
+# secret or password in this file is rejected at load. horch never prints secrets.
+# Store it in the Keychain with:
+#
+#   security add-generic-password -s horch-linear -a "$USER" -w
+#
+# Lookup order: the env var named by api_key_env, then the Keychain service.
+api_key_env      = "LINEAR_API_KEY"  # default if omitted
+keychain_service = "horch-linear"    # optional

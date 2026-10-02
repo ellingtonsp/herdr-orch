@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ellingtonsp/herdr-orch/internal/config"
 	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 )
@@ -168,6 +169,8 @@ type harness struct {
 	now time.Time
 	q   []func()
 	qmu sync.Mutex
+	// user is the per-user config the engine sees (never the real ~/.config/horch).
+	user config.Config
 }
 
 func newHarness(t *testing.T) *harness {
@@ -181,6 +184,7 @@ func newHarness(t *testing.T) *harness {
 	st.Now = func() time.Time { return x.now }
 	cfg := DefaultConfig()
 	cfg.ArchiveDir = t.TempDir()
+	cfg.UserConfig = func() (config.Config, error) { return x.user, nil }
 	x.e = NewEngine(st, x.h, cfg)
 	x.e.logf = t.Logf
 	x.e.promptRetry = time.Millisecond

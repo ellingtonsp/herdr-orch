@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
+  The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change
+  goes through the store. Writes take `--if-version` (optimistic concurrency) and append to an
+  append-only event log that records actor, actor kind, principal and approval. `plan events
+  --follow` streams events as they are written (new streaming RPC, `plan.subscribe`). `plan
+  export --finalize` writes the plan and its event log back as markdown that re-imports to the
+  same plan. Owner edits notify the coordinator.
+- **Per-user config.** `~/.config/horch/config.toml` (`$HORCH_CONFIG`), documented in
+  `config.example.toml`: owner principal, agents per role, slots, plan/day-log patterns, and
+  Linear. Secrets are refused in the file and come only from env or Keychain. `horch config`
+  shows what is missing.
+- Existing commands and wire formats are unchanged.
+
 ## 0.1.2 — 2026-10-02
 
 - **Clearer releases:** one archive per platform with readable names

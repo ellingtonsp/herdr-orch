@@ -217,7 +217,14 @@ Daemon environment (set before it starts):
 | `HORCH_BLOCKED_AFTER` | `20s` | How long a worker must stay blocked before escalation |
 | `HORCH_UNOBSERVED_AFTER` | `90s` | No activity after dispatch before escalation |
 
+Per-user config: `~/.config/horch/config.toml` (`$HORCH_CONFIG` overrides). Copy
+`config.example.toml`. It holds the owner principal (whose day-plan edits count as approvals),
+default agents per role, slot limits, plan-file and day-log branch patterns per project, and the
+Linear team. Secrets come only from the environment or the macOS Keychain, never the file.
+`horch config` shows what is missing.
+
 CLI environment: `HORCH_AS` acts as another identity (default: the herdr pane, else `human`).
+`HORCH_PRINCIPAL` names the human behind plan edits made from a pane.
 `HORCH_BIN_DIR` sets where `install-cli` puts the symlink.
 
 State lives in herdr's plugin state directory, one SQLite database per herdr session:

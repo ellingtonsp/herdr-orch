@@ -65,6 +65,77 @@ agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► d
 
 Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
 
+## Day plans
+
+The day plan has three phases. Only the middle one lives in horch.
+
+1. **Publish (your coordinator skill).** The skill writes the proposal, the owner
+   approves it, and `<date>.plan.md` is committed on the day-log branch.
+2. **Live (horch).** On approval, `horch plan import --day D --file <date>.plan.md --ref <commit>`
+   seeds the plan store. From then on every change goes through the store: orchestrator
+   transitions (`horch plan transition`) and the owner's re-order, hold, release, add and remove
+   (`horch plan item …`). Each write appends to an event log that subscribers receive as it happens.
+3. **Finalize (the skill, new mechanism).** At EOD,
+   `horch plan export --day D --format md --finalize --out <date>.plan.md` renders the plan plus
+   its event log back into the file, and the skill commits it. `final` freezes the plan.
+
+| Table | Holds |
+|---|---|
+| `plans` | id `<project>/<day>`, published ref + source hash, status (`draft, live, final`), coordinator pane, the file's other sections (verbatim), version |
+| `plan_items` | stable id, position, issues, kind, lane, model, state, PR, dispatch ref, title, What row (issues/where/model/output), why, held + reason (+ state held from), listed, version |
+| `plan_decisions` | the "Decisions that come back" bullets |
+| `plan_events` | seq, time, actor (pane or `human`), actor kind (`human, orchestrator, worker`), principal, approval, op, item, note, before/after JSON, plan version. **Append-only**: triggers refuse UPDATE and DELETE |
+
+Item states: `planned dispatched settled bounced ratified merged held replanned dropped`.
+
+- **Markdown.** `internal/planmd` parses the Items, What, Why, "Held on purpose" and Decisions
+  sections into rows and keeps every other section verbatim. Exporting a freshly imported
+  plan reproduces the published file byte for byte, and an export (with its event log)
+  imports back to the same plan. Held rows that are not Items rows become unlisted held
+  items: they appear only under "Held on purpose" until released.
+  Live exports include all items in the Items table, with a canonical JSON `details`
+  column preserving held-from state, listing status, ordering and multiline values.
+  When importing an export, that column supplies the item's complete content; the other
+  cells and What/Why/Held sections are readable projections. Edit `details` when changing
+  an exported item before re-importing. Published proposals without this column retain
+  their existing layout and parsing behavior. Versions and timestamps are assigned anew
+  on import; the exported event log is displayed as text, not replayed into the new store.
+- **Import is idempotent.** Re-importing the same file is a no-op and keeps live edits. A
+  different file for the same day is refused unless `--replace`, which reseeds the items and
+  keeps the event log.
+- **Identity and approval.** Every write records the caller (`--as` / `$HORCH_AS` / the pane /
+  `human`). The daemon decides the actor kind and approval; the caller never does. A named
+  principal (`--principal` / `$HORCH_PRINCIPAL`), or a terminal outside herdr (which acts for the
+  configured owner), is `human`. A registered worker pane, or a pane with an active dispatch,
+  is `worker`. Any other pane is `orchestrator`. Only writes by `owner.principal` from
+  `~/.config/horch/config.toml` carry `approval: true`. That flag is what a coordinator skill
+  counts as the owner's approval of a steer, not commit authorship.
+- **Optimistic concurrency.** Items and the plan carry versions. Writes with
+  `--if-version` (item) or `--if-plan-version` (plan) are refused with `version_conflict` when
+  stale, so a stale UI or CLI never overwrites a newer change. Every write bumps the item's
+  version and the plan's.
+- **Guards.** A held item cannot be transitioned (except to `dropped`/`replanned`) until released.
+  Holding goes through `item hold`, never `--state held`. A `final` plan refuses all writes.
+- **Fan-out.** Writes publish their events to an in-daemon hub. `plan.subscribe` is a streaming
+  op on orch.sock: the backlog after `--since`, then one line per event as it is committed.
+  Pushes, not polls. `horch plan events --follow` resumes from the last seq if the daemon
+  restarts. A subscriber more than 256 events behind is dropped and reconnects without loss.
+  `plan.events --wait` is the long-poll equivalent.
+- **Notifications.** A human edit (not import) messages the plan's coordinator (the pane that
+  imported it, else the newest running run's coordinator): `plan replanned by <principal>: …`,
+  saying whether it counts as the owner's approval.
+
+### Per-user config
+
+`~/.config/horch/config.toml` (`$HORCH_CONFIG` overrides; `config.example.toml` documents it):
+owner principal, default project, default agent kind/model/Codex effort per role, slot limits,
+per-project plan-file path and day-log branch patterns (`<date>` placeholder), and integrations
+(Linear team). Secrets are never in the file. The loader refuses secret-looking keys without
+echoing their values; `LinearAPIKey` reads `$LINEAR_API_KEY` (or the configured env var) or
+the macOS Keychain, and nothing prints it. The daemon re-reads the file on each plan write, so
+an owner change applies without a restart. `horch config` shows the file and what is missing
+(the web UI's first-run screen uses the same list).
+
 ## Out of scope
 
 - Multi-machine coordination: every agent runs against one herdr server.
@@ -80,3 +151,5 @@ Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
 | The daemon dies | Messages stop flowing | The CLI respawns it; SQLite keeps everything; statuses are re-synced on subscribe |
 | A herdr API change | Orchestration stops | `min_herdr_version`, and a protocol check that refuses to start (with a notification) on an unknown protocol |
 | Release with unsaved work | Lost changes | Refuse on uncommitted or unpushed work; `--force` is explicit |
+| A stale plan editor | Overwrites a newer change | `--if-version` / `--if-plan-version` refuse stale writes |
+| A pane claims to be the owner | A false approval | Local trust only (orch.sock is 0600, same user); a web UI should set the principal from the viewer's authenticated identity (e.g. a VPN or SSO header), never from the request body |

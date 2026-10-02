@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Integration test against a real, isolated herdr session (never the default one).
 # Runs the end-to-end scenarios:
+#   Plan:    import a published day plan, live edits from two identities, events --follow,
+#            version conflicts, export → import round trip.
 #   Mailbox: dispatch to two workers in separate worktrees; both settle with the
 #            coordinator only blocking on `horch check --wait` (no polling loop);
 #            survives a daemon restart mid-run; a worker that goes idle without
@@ -23,6 +25,15 @@ export HERDR_SOCKET_PATH=$SOCK
 export PATH=$BIN:$PATH
 export HORCH_IDLE_REPORT_AFTER=4s
 export HORCH_UNOBSERVED_AFTER=60s
+# The daemon reads the per-user config; never the real ~/.config/horch here.
+export HORCH_CONFIG=$WORK/horch.toml
+cat >"$HORCH_CONFIG" <<'TOML'
+default_project = "it"
+[owner]
+principal = "it-owner"
+[projects.it]
+repo = "example/it"
+TOML
 
 pass=0
 ok()   { pass=$((pass + 1)); printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -107,6 +118,41 @@ for t in "$T1" "$T2"; do
   [ "$s" = completed ] || die "$t is $s"
 done
 ok "both dispatches settled completed; coordinator only blocked on check --wait"
+
+# Runs right after the CLI restarted the daemon, so this build (not the plugin-started
+# one) serves the plan ops.
+step "day plan: import, live edits, follow, export round trip"
+FIX=$ROOT/internal/planmd/testdata/example.plan.md
+out=$(HORCH_AS="$COORD" horch plan import --day 2026-03-14 --file "$FIX" --ref fixture --json)
+[ "$(echo "$out" | j .changed)" = true ] && [ "$(echo "$out" | j '.view.items | length')" = 12 ] || die "import: $out"
+[ "$(HORCH_AS="$COORD" horch plan import --day 2026-03-14 --file "$FIX" --json | j .changed)" = false ] || die "re-import changed the plan"
+ok "imported the example plan (12 items); re-import is a no-op"
+horch plan events --follow --json >"$WORK/follow.ndjson" &
+FOLLOW=$!
+sleep 0.5
+V=$(horch plan show --json | j '.items[] | select(.id=="B1") | .version')
+HORCH_AS="$COORD" horch plan transition --item B1 --state settled --pr '#1' --if-version "$V" --json >/dev/null
+out=$(horch plan item update --item B1 --title stale --if-version "$V" --json 2>/dev/null || true)
+[ "$(echo "$out" | j .error.code)" = version_conflict ] || die "stale write not refused: $out"
+ok "orchestrator transition applied; a stale --if-version write is refused"
+horch plan item hold --item I1 --reason "sim farm down" --json >/dev/null
+horch plan item add --item B2 --issues ACME-1 --title "slice b" --position 2 --json >/dev/null
+horch plan item move --item W1 --to 1 --json >/dev/null
+last=$(horch plan events --json | j '.[-1]')
+[ "$(echo "$last" | j .principal)" = it-owner ] && [ "$(echo "$last" | j .approval)" = true ] || die "owner edit not an approval: $last"
+[ "$(horch inbox --as "$COORD" --json | j '[.[] | select(.subject | startswith("plan replanned by it-owner"))] | length')" = 3 ] || die "coordinator not told about owner edits"
+ok "owner edits recorded as approvals; coordinator told 3 times"
+for _ in $(seq 50); do [ "$(wc -l <"$WORK/follow.ndjson")" -ge 5 ] && break; sleep 0.1; done
+kill "$FOLLOW" 2>/dev/null; wait "$FOLLOW" 2>/dev/null || true
+[ "$(j -s 'map(.op) | join(",")' "$WORK/follow.ndjson")" = "import,transition,item.hold,item.add,item.move" ] || die "follow got: $(cat "$WORK/follow.ndjson")"
+ok "events --follow received the backlog and every live event"
+horch plan export --out "$WORK/export.md" --json >/dev/null
+grep -q '^## Event log' "$WORK/export.md" || die "export lacks the event log"
+horch plan import --day 2026-10-03 --file "$WORK/export.md" --json >/dev/null
+a=$(horch plan show --day 2026-03-14 --json | j '[.items[] | [.id,.state,.held,.title,.pr]]')
+b=$(horch plan show --day 2026-10-03 --json | j '[.items[] | [.id,.state,.held,.title,.pr]]')
+[ "$a" = "$b" ] || die "export → import changed the plan"
+ok "export → import round trip preserves every item"
 
 S=$(fake "$WORK/wt-c" silent)
 horch worker register --pane "$S" --json >/dev/null

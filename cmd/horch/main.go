@@ -53,6 +53,19 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch schedule add --cron "*/30 * * * *" (--horch "dispatch next" | --prompt-to NAME --prompt TEXT)
   horch schedule list | rm --id S | run --id S | enable --id S [--off]
 
+  horch plan import --day D --file PLAN.md [--ref COMMIT] [--status draft|live] [--replace]
+  horch plan show [--day D]                          (default: the project's latest plan)
+  horch plan item add --item ID [--position N] [--issues a,b] [--kind K] [--lane L] [--model M]
+                      [--state S] [--pr P] [--dispatch-ref R] [--title T] [--where W] [--output O] [--why Y]
+  horch plan item update --item ID [field flags as for add] [--if-version N]
+  horch plan item move --item ID --to N | hold --item ID --reason R | release --item ID | remove --item ID
+  horch plan transition --item ID --state S [--note N] [--pr P] [--dispatch-ref R]   (orchestrator path)
+  horch plan events [--since SEQ] [--follow] [--all]   horch plan status --set draft|live|final
+  horch plan export [--day D] [--format md|json] [--out FILE] [--finalize]
+    plan flags: --project P (default: config default_project), --principal NAME ($HORCH_PRINCIPAL),
+    --if-version N (item) / --if-plan-version N (plan): refused if stale.
+  horch config          show ~/.config/horch/config.toml ($HORCH_CONFIG) and what is missing
+
   horch status          daemon health          horch daemon stop
   horch guide           print the agent guide (SKILL.md)
   horch version
@@ -197,6 +210,10 @@ func dispatch(ctx context.Context, args []string) error {
 		return cmdGate(ctx, sub, tail(rest))
 	case "schedule":
 		return cmdSchedule(ctx, sub, tail(rest))
+	case "plan":
+		return cmdPlan(ctx, sub, tail(rest))
+	case "config":
+		return cmdConfig(rest)
 	case "status":
 		f := fs("status")
 		if _, err := parse(f, rest); err != nil {

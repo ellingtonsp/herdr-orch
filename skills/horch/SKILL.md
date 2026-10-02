@@ -114,6 +114,38 @@ horch schedule list | run --id s1 | enable --id s1 --off | rm --id s1
 A gate blocks its task until resolved (from the CLI or the herdr "resolve gate" popup);
 a timed-out gate escalates and keeps the task blocked.
 
+## Day plan
+
+The published `<date>.plan.md` is the start and end of the day. In between, the plan lives in
+horch, and every change goes through it so subscribers see it live.
+
+```bash
+horch plan import --day 2026-03-14 --file docs/orchestration/2026-03-14.plan.md --ref <commit>
+horch plan show                                   # latest plan of the default project
+horch plan transition --item B1 --state dispatched --dispatch-ref horch:r2/t15/d15@w1J:p1
+horch plan transition --item B1 --state settled --pr '#214' --note "PR up"
+horch plan item add --item B2 --issues ACME-51 --kind build --lane local --title "slice b" --position 3
+horch plan item hold --item I1 --reason "sim farm down"     # release --item I1 to resume
+horch plan item move --item W1 --to 1 ;  horch plan item remove --item U3 --note "folded into R3"
+horch plan events --follow --json                 # NDJSON stream of every change
+horch plan export --day 2026-03-14 --format md --finalize --out docs/orchestration/2026-03-14.plan.md
+```
+
+- States: `planned dispatched settled bounced ratified merged held replanned dropped`.
+- Import on approval. Re-importing the same file is a no-op. A different file needs `--replace`.
+- The orchestrator records progress with `plan transition`, never by editing the file mid-day.
+  A held item refuses transitions until released.
+- Every event carries `actor`, `actor_kind` (`human|orchestrator|worker`), `principal` and
+  `approval`. Only edits by the configured owner (`owner.principal` in
+  `~/.config/horch/config.toml`) have `approval: true`. Treat those as the owner's approval
+  of that change. Orchestrator writes never are.
+- Read-modify-write with the version you read: `--if-version N` on item commands and
+  `--if-plan-version N` on `item add` / `plan status`. `version_conflict` means reload and
+  re-decide; do not retry blindly.
+- Owner edits arrive in the coordinator's inbox as `plan replanned by <owner>: …`.
+- Every plan command takes `--project P` (default: `default_project`) and `--day D`
+  (default: latest), and the owner can act from a pane with `--principal NAME`.
+
 ## Coming from Orca orchestration
 
 | Orca | horch |
