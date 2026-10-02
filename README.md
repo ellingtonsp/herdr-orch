@@ -287,6 +287,10 @@ make live                     # real claude + codex workers do a small task (spe
 The integration scripts start their own named herdr session and never touch your default one.
 `SKIP_REAL_AGENTS=1` skips the real-agent step; `REAL_AGENTS="claude codex"` picks which to use.
 
+CI also runs a `private-terms` check: `scripts/check-private-terms.sh` fails if the tree or the
+PR text matches a term in the `PRIVATE_TERMS` repository secret (one regex per line). It reports
+file:line only. Forks can set their own secret, or leave it unset to skip the check.
+
 Releases: bump `version` in `herdr-plugin.toml`, add a `CHANGELOG.md` entry, tag `v<version>`.
 The release workflow cross-compiles both binaries for macOS/Linux × amd64/arm64 and attaches
 SHA-256 files, which `scripts/fetch-or-build.sh` verifies at install time.
