@@ -22,3 +22,15 @@ jobs:
       - run: make build OUT=dist
       - run: dist/horch version && dist/herdr-orch version
       - run: sh -n scripts/fetch-or-build.sh
+
+  # Guards against project-specific content landing in this public repo. The term list is the
+  # PRIVATE_TERMS repository secret; the check prints only file:line locations.
+  private-terms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: No private terms in the tree or the PR text
+        env:
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
+          PR_TEXT: "${{ github.event.pull_request.title }}\n${{ github.event.pull_request.body }}"
+        run: sh scripts/check-private-terms.sh
