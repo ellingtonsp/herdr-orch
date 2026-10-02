@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 — 2026-10-02
+
+- **Clearer releases:** one archive per platform with readable names
+  (`herdr-orch-v<version>-macos-arm64.tar.gz`, …), each containing both binaries, plus a single
+  `checksums.txt`. Release notes say up front that `herdr plugin install` needs no manual download,
+  and map each machine to its archive. The installer downloads and verifies the archive.
+
 ## 0.1.1 — 2026-10-02
 
 - **No blind re-sends across a daemon restart.** When the connection drops after a request was

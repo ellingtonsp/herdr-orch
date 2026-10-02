@@ -1,6 +1,6 @@
 id = "herdr-orch"
 name = "herdr-orch"
-version = "0.1.1"
+version = "0.1.2"
 min_herdr_version = "0.9.1"
 description = "Orchestrate coding agents across panes: mailbox, blocking ask/reply, tasks with dependencies, tracked dispatch, decision gates, verified worker release, schedules. CLI: horch."
 platforms = ["macos", "linux"]
