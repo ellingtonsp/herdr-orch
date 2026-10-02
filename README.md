@@ -231,6 +231,127 @@ State lives in herdr's plugin state directory, one SQLite database per herdr ses
 `~/.local/state/herdr/plugins/herdr-orch/sessions/<session>/` (`orch.db`, `daemon.log`,
 `archive/` for released workers' transcripts).
 
+## Web UI
+
+Run `horch web` inside the same session as your daemon, then open
+<http://127.0.0.1:7171>. `--listen` overrides the configured address. The HTML,
+vanilla JavaScript and CSS are embedded in the Go binary: no npm build or external
+assets. The web process attaches to the existing daemon through a Go socket client;
+it never starts or replaces the daemon. Ctrl-C stops HTTP only.
+
+The phone-friendly page puts blocked workers, unanswered asks, unread escalations
+and pending/timed-out gates first. Workers show the daemon's observed status,
+active task, worktree, recorded plan model and elapsed time; history is folded.
+An unreported status/model stays unknown, rather than implying a running model.
+The selected project's latest plan is the default; the project/day fields select
+an older snapshot. The ordered plan includes state chips, generic lanes A/B,
+held items, decisions, notes and the full event timeline. The inbox shows the
+latest 50 messages across runs. Reading the page never consumes mail.
+
+Plan changes arrive through `plan.subscribe`, relayed as browser server-sent
+events with replay cursors. Workers and inbox poll every five seconds through the
+same SSE connection. Edits pause on disconnection. Reorder by dragging the grip,
+by a touch grip gesture, or with Up/Down buttons; hold/release and add/remove use
+the plan API. Every edit names its project/day, carries the item's `if_version`
+(except add) and the plan's `if_plan_version`, and records the authenticated
+principal and caller. A stale edit receives HTTP 409; the UI refreshes for review
+without automatically retrying it. No edit writes a git commit. Questions and
+gates are displayed for attention; reply/resolve through the existing CLI.
+
+### Access and tailnet exposure
+
+Add these preferences to `~/.config/horch/config.toml` (or `$HORCH_CONFIG`):
+
+```toml
+[owner]
+principal = "you@example.com"
+
+[web]
+listen = "127.0.0.1:7171"
+owner_principal = "you@example.com"
+identity_header = "X-Remote-User"
+allow_local_writes = false
+```
+
+`listen` defaults to `127.0.0.1:7171`; `owner_principal` defaults to
+`owner.principal`; local writes default to false. `identity_header` has no default:
+set it to the authenticated user header injected by your trusted reverse proxy.
+Use your own login as the owner in your local config. Keep the two principals
+equal if web edits should count as owner approvals. These are preferences, with
+no secrets in the file.
+
+Reads are available to anyone who can reach the listener. Writes require a
+configured `identity_header` whose value exactly matches `web.owner_principal`.
+Headers are accepted only from loopback peers, where the trusted proxy connects.
+An unconfigured or missing header refuses writes unless `allow_local_writes = true`,
+which allows plain loopback connections (with a `localhost`/loopback `Host`, to defeat DNS rebinding) to act as the configured owner. Never enable it when a proxy forwards unauthenticated requests to the listener. A guest,
+empty or repeated identity header never falls back to local access. JSON and
+same-origin checks protect edits from cross-site submissions.
+
+To expose the page only inside your tailnet, keep the HTTP bind on loopback and
+use a reverse proxy or tailnet proxy that injects an authenticated user header:
+
+```sh
+horch web --listen 127.0.0.1:7171
+```
+
+Configure that proxy with an HTTPS listener reachable only on your private
+network, upstream `http://127.0.0.1:7171`, and an identity header such as
+`X-Remote-User`. The proxy must authenticate the requester, strip any incoming
+copy of the identity header, then set the header to the verified user's login.
+Set `web.identity_header` to the exact header name your proxy injects and
+`web.owner_principal` to the owner's verified login. Leave local writes disabled
+when accessing the page through the proxy. No proxy credentials belong in the
+horch config.
+
+Open the proxy's private HTTPS URL. Loopback access is a trust boundary: other
+local processes can send headers, so this is intended for a trusted single-user
+host. Binding a wider address exposes reads; direct network peers cannot
+authorize writes by supplying an identity header.
+
+### JSON API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/identity` | Caller principal and edit capability |
+| `GET /api/plan?project=myapp&day=2026-03-14` | Store snapshot and full timeline; omitted fields use daemon defaults |
+| `GET /api/activity` | Workers with active tasks, open attention, gates and recent inbox |
+| `GET /api/events` | SSE: `ready`, `plan`, `activity`, `unavailable`; `Last-Event-ID` or `since` resumes plan events |
+| `POST /api/plan/items/{add,move,hold,release,remove}` | Version-checked store edit; daemon `PlanItemArgs` JSON |
+
+For example, an owner edit sends `Content-Type: application/json` with
+`{"project":"myapp","day":"2026-03-14","item":"ACME-12","if_version":2,"if_plan_version":8,"reason":"Review pending"}`
+to `/api/plan/items/hold`. The server derives caller/principal from identity,
+overriding any principal in the JSON. Invalid input is 400, refused identity is
+403, missing plans/items are 404, stale/final plans are 409 and daemon failures
+are 503. Edits are never retried after an uncertain response.
+
+### Synthetic screenshots and browser checks
+
+These captures use only `internal/planmd/testdata/example.plan.md`, with synthetic
+workers/messages and sample lanes A/B added in temporary state.
+
+![Desktop dark theme with attention and workers](docs/screenshots/web-desktop-dark.png)
+
+<img src="docs/screenshots/web-mobile-light.png" alt="Phone light theme with attention first" width="390">
+<img src="docs/screenshots/web-plan-mobile-light.png" alt="Phone plan with ordered items and lane chips" width="390">
+
+To reproduce, run `go run ./scripts/web-preview` from the repository root. It
+prints an ephemeral localhost URL, uses a temporary in-process daemon, and
+removes its state on Ctrl-C. It cannot connect to an existing session. With
+Playwright and Chromium already installed for development, run:
+
+```sh
+node scripts/check-web-ui.cjs http://127.0.0.1:PORT
+```
+
+`PLAYWRIGHT_MODULE` can point to an existing Playwright package;
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` can point to an installed Chromium browser.
+The optional browser check captures desktop/phone themes, checks layout and
+all edit actions, stale-view refresh, escaped text, and guest read-only access.
+`make vet test race` requires only Go and covers handlers, auth, version conflicts,
+SSE delivery/replay/polling and `horch web` against an isolated in-process daemon.
+
 ## How it works
 
 ```

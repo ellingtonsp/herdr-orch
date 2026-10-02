@@ -200,3 +200,37 @@ func TestMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestWebPreferences(t *testing.T) {
+	c, err := LoadFile(write(t, `[owner]
+principal = "you"
+[web]
+listen = "127.0.0.1:7172"
+owner_principal = "you@example.com"
+identity_header = "X-Remote-User"
+allow_local_writes = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := c.WebSettings(); w.Listen != "127.0.0.1:7172" || w.OwnerPrincipal != "you@example.com" || w.IdentityHeader != "X-Remote-User" || !w.AllowLocalWrites {
+		t.Fatalf("web: %+v", w)
+	}
+	defaults := (Config{Owner: Owner{Principal: "you"}}).WebSettings()
+	if defaults.Listen != DefaultWebListen || defaults.OwnerPrincipal != "you" || defaults.IdentityHeader != "" || defaults.AllowLocalWrites {
+		t.Fatalf("defaults: %+v", defaults)
+	}
+	for _, address := range []string{"bad", "127.0.0.1:no", "127.0.0.1:65536", "127.0.0.1:-1"} {
+		if ValidateWebListen(address) == nil {
+			t.Fatalf("accepted %q", address)
+		}
+	}
+}
+
+func TestWebIdentityHeaderValidation(t *testing.T) {
+	for _, header := range []string{"X Remote User", "X-Remote-User\n", "身份"} {
+		if (Config{Web: Web{IdentityHeader: header}}).Validate() == nil {
+			t.Fatalf("accepted invalid header %q", header)
+		}
+	}
+}

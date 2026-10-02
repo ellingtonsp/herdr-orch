@@ -8,11 +8,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -24,12 +26,45 @@ const defaultLinearKeyEnv = "LINEAR_API_KEY"
 type Config struct {
 	File           string             `toml:"-" json:"file"`
 	Found          bool               `toml:"-" json:"found"`
+	Web            Web                `toml:"web" json:"web"`
 	Owner          Owner              `toml:"owner" json:"owner"`
 	DefaultProject string             `toml:"default_project" json:"default_project"`
 	Agents         map[string]Agent   `toml:"agents" json:"agents"`
 	Slots          Slots              `toml:"slots" json:"slots"`
 	Projects       map[string]Project `toml:"projects" json:"projects"`
 	Integrations   Integrations       `toml:"integrations" json:"integrations"`
+}
+
+// Web holds listener preferences; identity is supplied by a trusted tailnet proxy.
+type Web struct {
+	Listen           string `toml:"listen" json:"listen"`
+	OwnerPrincipal   string `toml:"owner_principal" json:"owner_principal"`
+	IdentityHeader   string `toml:"identity_header" json:"identity_header"`
+	AllowLocalWrites bool   `toml:"allow_local_writes" json:"allow_local_writes"`
+}
+
+const DefaultWebListen = "127.0.0.1:7171"
+
+func (c Config) WebSettings() Web {
+	w := c.Web
+	if w.Listen == "" {
+		w.Listen = DefaultWebListen
+	}
+	if w.OwnerPrincipal == "" {
+		w.OwnerPrincipal = c.Owner.Principal
+	}
+	return w
+}
+func ValidateWebListen(address string) error {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return errors.New("web.listen: want host:port")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return errors.New("web.listen: invalid port")
+	}
+	return nil
 }
 
 // Owner is the human running horch. Principal is the identity whose plan edits count as approvals.
@@ -189,6 +224,14 @@ var (
 
 // Validate checks enum values, ranges, and that DefaultProject exists.
 func (c Config) Validate() error {
+	for _, ch := range c.Web.IdentityHeader {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("!#$%&'*+-.^_`|~", ch)) {
+			return errors.New("web.identity_header: want an HTTP header name")
+		}
+	}
+	if err := ValidateWebListen(c.WebSettings().Listen); err != nil {
+		return err
+	}
 	roles := make([]string, 0, len(c.Agents))
 	for r := range c.Agents {
 		roles = append(roles, r)

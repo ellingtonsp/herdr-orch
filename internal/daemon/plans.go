@@ -278,6 +278,17 @@ func (e *Engine) planItemOp(op string) Handler {
 		}
 		act := e.actor(caller, a.Principal)
 		return e.planWrite(func() (store.PlanWrite, error) {
+			// Checking the whole plan under the writer lock also fences a stale
+			// reorder after another item moved or was added/removed.
+			if op != "add" && a.IfPlanVersion != 0 {
+				current, err := e.st.GetPlanView(p.ID)
+				if err != nil {
+					return store.PlanWrite{}, err
+				}
+				if current.Plan.Version != a.IfPlanVersion {
+					return store.PlanWrite{}, refusal("version_conflict", "plan changed: reload and retry")
+				}
+			}
 			switch op {
 			case "add":
 				it := store.PlanItem{ID: a.Item}

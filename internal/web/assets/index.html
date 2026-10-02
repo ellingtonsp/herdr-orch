@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>horch · Fleet</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+ <div class="wrap">
+  <div class="bar"><a class="brand" href="#needs">horch <span>Fleet</span></a><span id="connection" role="status">Connecting…</span><button id="theme" aria-label="Change color theme">Theme</button></div>
+  <nav aria-label="Views"><a href="#needs">Needs you <span id="need-count">0</span></a><a href="#workers">Workers</a><a href="#plan">Plan</a><a href="#inbox">Inbox</a></nav>
+ </div>
+</header>
+<main class="wrap">
+ <p id="notice" role="status" aria-live="polite" hidden></p>
+ <div class="overview">
+  <section id="needs" aria-labelledby="needs-heading"><div class="heading"><h1 id="needs-heading">Needs you</h1><span class="eyebrow">Attention first</span></div><div id="attention"><p class="empty">Loading attention…</p></div></section>
+  <section id="workers" aria-labelledby="workers-heading"><div class="heading"><h2 id="workers-heading">Workers</h2><span id="worker-count" class="muted"></span></div><div id="live-workers"></div><details class="fold"><summary>Worker history <span id="history-count"></span></summary><div id="worker-history"></div></details></section>
+ </div>
+ <section id="plan" aria-labelledby="plan-heading">
+  <div class="heading"><h2 id="plan-heading">Day plan</h2><span id="plan-meta" class="muted"></span></div>
+  <form id="scope" class="scope"><label>Project<input name="project" placeholder="Default project" autocomplete="off"></label><label>Day<input name="day" type="date"></label><button type="submit">Load plan</button></form>
+  <p id="access" class="muted">Checking edit access…</p>
+  <div id="lane-summary" class="lanes" aria-label="Plan lanes"></div>
+  <div id="plan-items"></div>
+  <details class="fold" id="add-panel"><summary>Add an item</summary><form id="add-item" class="card form-grid">
+   <label>Item ID<input name="item" placeholder="ACME-12" required maxlength="120" autocomplete="off"></label>
+   <label>Title<input name="title" placeholder="Build an export preview" required maxlength="500"></label>
+   <label>Kind<select name="kind"><option>build</option><option>review</option><option>chore</option></select></label>
+   <label>Lane<select name="lane"><option value="local">Local</option><option value="A">Lane A</option><option value="B">Lane B</option><option value="coordinator">Coordinator</option></select></label>
+   <label>Model (optional)<input name="model" placeholder="Default" maxlength="120"></label>
+   <label>Issues (comma separated)<input name="issues" placeholder="ACME-12, ACME-17" maxlength="500"></label>
+   <div class="full"><button class="primary" type="submit" data-edit>Add to plan</button></div>
+  </form></details>
+  <details class="fold" open><summary>Held on purpose <span id="held-count"></span></summary><div id="held-items"></div></details>
+  <details class="fold"><summary>Decisions</summary><div id="decisions"></div></details>
+  <details class="fold"><summary>Plan notes</summary><div id="plan-notes"></div></details>
+  <details class="fold"><summary>Event timeline <span id="event-count"></span></summary><ol id="timeline"></ol></details>
+ </section>
+ <section id="inbox" aria-labelledby="inbox-heading"><div class="heading"><h2 id="inbox-heading">Inbox</h2><span class="muted">Recent 50 messages</span></div><div id="messages"></div></section>
+ <footer>Live plan store · edits record identity and versions</footer>
+</main>
+</body>
+</html>

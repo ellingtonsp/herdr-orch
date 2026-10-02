@@ -164,3 +164,11 @@ func (s *Store) TakeReply(question string) (Message, error) {
 	}
 	return m, err
 }
+
+// OpenAttention keeps unanswered questions visible even after they were read,
+// while acknowledged escalations leave the attention surface. Reads consume nothing.
+func (s *Store) OpenAttention() ([]Message, error) {
+	return s.queryMsgs(`SELECT ` + msgCols + ` FROM messages WHERE
+ (kind='question' AND NOT EXISTS (SELECT 1 FROM messages reply WHERE reply.reply_to=messages.id AND reply.kind='reply'))
+ OR (kind='escalation' AND read_at IS NULL) ORDER BY created_at, id`)
+}

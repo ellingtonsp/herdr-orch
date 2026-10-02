@@ -64,6 +64,7 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch plan export [--day D] [--format md|json] [--out FILE] [--finalize]
     plan flags: --project P (default: config default_project), --principal NAME ($HORCH_PRINCIPAL),
     --if-version N (item) / --if-plan-version N (plan): refused if stale.
+  horch web [--listen 127.0.0.1:7171]              (embedded fleet UI; Ctrl-C stops HTTP only)
   horch config          show ~/.config/horch/config.toml ($HORCH_CONFIG) and what is missing
 
   horch status          daemon health          horch daemon stop
@@ -212,6 +213,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return cmdSchedule(ctx, sub, tail(rest))
 	case "plan":
 		return cmdPlan(ctx, sub, tail(rest))
+	case "web":
+		return cmdWeb(ctx, rest)
 	case "config":
 		return cmdConfig(rest)
 	case "status":
