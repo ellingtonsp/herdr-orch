@@ -84,9 +84,9 @@ horch send --to coordinator --kind escalation --body "found a security issue in 
 ## Workers
 
 ```bash
-horch worker start --agent claude|pi|codex --worktree DIR [--name N] [-- agent args]   # new tab
+horch worker start --agent claude|pi|codex --worktree DIR [--name N] [-- agent args]   # shell in worktree workspace
 horch worker start --agent codex --pane w4:p1 --name n1-1 -- --model ID  # existing shell pane,
-                                              # e.g. the root pane from `herdr worktree create`
+                                              # must have a workspace and an available shell
 horch worker register --pane w1:p4            # adopt an agent pane you already have
 horch worker list | show | read --worker N [--lines 200]
 horch worker release --worker N               # archive transcript, close pane, verify every process is gone
@@ -164,3 +164,26 @@ Status values match Orca's, so Orca-based skills port with renames: runs `idle|r
 
 horch does not create or delete worktrees: use `herdr worktree create` (or git) and pass the path
 or the new workspace's pane to `horch worker start`.
+
+## Watch PR CI
+
+```sh
+horch pr watch 12 --repo you/myapp [--until green|merged] [--run r1]
+```
+
+Run in a supervised shell with authenticated `gh`. The foreground watcher posts to the
+selected run's coordinator inbox and prints events (`--json` for JSON lines). It never
+starts a daemon or changes a PR. Required CI uses classic protection plus active rulesets;
+when discovery is unavailable, configure `projects.<name>.required_checks` for the matching
+`repo`. Optional failures do not fail required CI. Superseded same-head runs/attempts are
+ignored. Two stable polls precede `ci green` or `required check failed: <name> <url>`.
+`--until green` exits on green/merged or a required failure; `--until merged` keeps watching
+through failures and posts `left merge queue: <reason>` and `merged`. API/delivery failures
+exit nonzero. Restarting can repeat notifications. Green is head CI evidence, not merge
+approval or merge-group validation. `--interval 15s` and `--race-window 5s` tune polling and
+push/ready warnings; inferred workflow timing is labelled as a possible race.
+
+`worker start --worktree DIR` finds/opens that worktree's workspace and reuses an available
+shell or creates a shell tab. It skips widgets and busy panes. `--cwd DIR` keeps the existing
+caller-workspace behavior. Do not combine `--worktree` with `--cwd` or `--pane`. A pane with
+no workspace is an error; choose a shell in a workspace.

@@ -9,10 +9,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 )
@@ -124,6 +126,9 @@ func (c *Client) PaneGet(ctx context.Context, paneID string) (Pane, error) {
 		Pane Pane `json:"pane"`
 	}
 	err := c.Call(ctx, "pane.get", map[string]any{"pane_id": paneID}, &r)
+	if err == nil && r.Pane.WorkspaceID == "" {
+		return Pane{}, fmt.Errorf("pane.get: pane %s has no workspace; choose a shell pane in a workspace", paneID)
+	}
 	return r.Pane, err
 }
 
@@ -136,11 +141,26 @@ func (c *Client) AgentGet(ctx context.Context, target string) (Pane, error) {
 }
 
 type ProcessInfo struct {
-	ShellPID            int `json:"shell_pid"`
-	ForegroundProcesses []struct {
+	ForegroundProcessGroupID int `json:"foreground_process_group_id"`
+	ShellPID                 int `json:"shell_pid"`
+	ForegroundProcesses      []struct {
 		PID  int    `json:"pid"`
 		Name string `json:"name"`
 	} `json:"foreground_processes"`
+}
+
+// AvailableShell requires a shell with no other process in the foreground.
+// Widgets and incomplete process information do not establish an available shell.
+func (p ProcessInfo) AvailableShell() bool {
+	if p.ShellPID <= 0 || (p.ForegroundProcessGroupID != 0 && p.ForegroundProcessGroupID != p.ShellPID) {
+		return false
+	}
+	for _, f := range p.ForegroundProcesses {
+		if f.PID != p.ShellPID {
+			return false
+		}
+	}
+	return p.ForegroundProcessGroupID == p.ShellPID || len(p.ForegroundProcesses) > 0
 }
 
 // PIDs returns the shell pid and every foreground pid, deduplicated.
@@ -234,6 +254,130 @@ func (c *Client) NewTab(ctx context.Context, workspaceID, cwd, label string, env
 	}
 	err := c.Call(ctx, "tab.create", params, &r)
 	return r.RootPane, err
+}
+
+type worktreeWorkspace struct {
+	WorkspaceID string `json:"workspace_id"`
+	Worktree    *struct {
+		CheckoutPath string `json:"checkout_path"`
+	} `json:"worktree"`
+}
+
+// sameDirectory handles cleaned paths and local symlink aliases without matching
+// sibling checkouts or a shell that has changed into a different directory.
+func sameDirectory(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	canonical := func(path string) string {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			return resolved
+		}
+		return abs
+	}
+	return canonical(a) == canonical(b)
+}
+
+// WorktreePane finds or opens the checkout's workspace and returns an available
+// shell there. The boolean says whether this call created the returned pane;
+// callers must not close a reused shell when agent startup fails.
+func (c *Client) WorktreePane(ctx context.Context, cwd, label string, env map[string]string) (Pane, bool, error) {
+	var listed struct {
+		Workspaces []worktreeWorkspace `json:"workspaces"`
+	}
+	if err := c.Call(ctx, "workspace.list", nil, &listed); err != nil {
+		return Pane{}, false, fmt.Errorf("list worktree workspaces: %w", err)
+	}
+	ws := ""
+	for _, w := range listed.Workspaces {
+		if w.Worktree != nil && sameDirectory(w.Worktree.CheckoutPath, cwd) {
+			if w.WorkspaceID == "" {
+				return Pane{}, false, fmt.Errorf("worktree workspace has no workspace ID")
+			}
+			if ws != "" && ws != w.WorkspaceID {
+				return Pane{}, false, fmt.Errorf("multiple workspaces match the worktree; choose an explicit --pane")
+			}
+			ws = w.WorkspaceID
+		}
+	}
+	if ws == "" {
+		var opened struct {
+			Workspace *worktreeWorkspace `json:"workspace"`
+		}
+		if err := c.Call(ctx, "worktree.open", map[string]any{"path": cwd, "cwd": cwd, "focus": false}, &opened); err != nil {
+			return Pane{}, false, fmt.Errorf("open worktree workspace: %w", err)
+		}
+		if opened.Workspace == nil || opened.Workspace.WorkspaceID == "" || opened.Workspace.Worktree == nil || !sameDirectory(opened.Workspace.Worktree.CheckoutPath, cwd) {
+			return Pane{}, false, fmt.Errorf("worktree.open returned no matching workspace")
+		}
+		ws = opened.Workspace.WorkspaceID
+	}
+	var listedPanes struct {
+		Panes []Pane `json:"panes"`
+	}
+	if err := c.Call(ctx, "pane.list", map[string]any{"workspace_id": ws}, &listedPanes); err != nil {
+		return Pane{}, false, fmt.Errorf("list worktree panes: %w", err)
+	}
+	for _, p := range listedPanes.Panes {
+		if p.PaneID == "" || p.WorkspaceID != ws || (p.Agent != nil && *p.Agent != "") || p.Cwd == nil || !sameDirectory(*p.Cwd, cwd) || (p.ForegroundCwd != nil && !sameDirectory(*p.ForegroundCwd, cwd)) {
+			continue
+		}
+		info, err := c.ProcessInfo(ctx, p.PaneID)
+		if err != nil {
+			// Some nonterminal panes reject process inspection. A server refusal
+			// establishes no usable shell, so try another candidate. Connection,
+			// context, and decoding failures remain errors rather than mutations.
+			var apiErr *Error
+			if errors.As(err, &apiErr) {
+				continue
+			}
+			return Pane{}, false, fmt.Errorf("check worktree shell: %w", err)
+		}
+		if info.AvailableShell() {
+			return p, false, nil
+		}
+	}
+	p, err := c.NewTab(ctx, ws, cwd, label, env)
+	if err != nil {
+		return Pane{}, false, fmt.Errorf("create worktree tab: %w", err)
+	}
+	if p.PaneID == "" || p.WorkspaceID != ws {
+		return Pane{}, false, fmt.Errorf("tab.create returned no pane in the worktree workspace")
+	}
+	if err := waitForShell(ctx, func(ctx context.Context) (ProcessInfo, error) { return c.ProcessInfo(ctx, p.PaneID) }); err != nil {
+		return p, true, fmt.Errorf("new worktree tab has no shell: %w", err)
+	}
+	return p, true, nil
+}
+
+// A new terminal may not have spawned its shell yet. Bound this check so a
+// widget or a broken terminal cannot reach AgentStart or wait indefinitely.
+func waitForShell(ctx context.Context, read func(context.Context) (ProcessInfo, error)) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := read(ctx)
+		if err != nil {
+			return err
+		}
+		if info.ShellPID > 0 {
+			return nil
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // Split splits target (or the focused pane if empty) and returns the new pane.

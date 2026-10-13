@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Native PR watch.** `horch pr watch <n> [--until green|merged] [--repo owner/name]`
+  reports required CI, queue removals and merges to the coordinator inbox, selects latest
+  same-head workflow attempts, warns about push/ready races, and supports per-project
+  `required_checks` fallbacks when branch policy discovery is unavailable.
+- **Worktree shells.** `worker start --worktree` finds or creates an available shell in
+  the worktree workspace, skipping widgets and busy panes. Missing pane workspace IDs
+  now fail clearly. `--cwd` preserves caller-workspace tab creation.
+
 - **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
   The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change
   goes through the store. Writes take `--if-version` (optimistic concurrency) and append to an
