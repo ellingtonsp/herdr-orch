@@ -176,6 +176,28 @@ var migrations = []string{
 	`CREATE TRIGGER plan_events_no_replace BEFORE INSERT ON plan_events
 		WHEN EXISTS(SELECT 1 FROM plan_events WHERE seq=NEW.seq)
 		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
+	// 5: requested worker launch metadata and durable dispatch report history.
+	`ALTER TABLE workers ADD COLUMN account TEXT;
+	ALTER TABLE workers ADD COLUMN profile TEXT;
+	ALTER TABLE workers ADD COLUMN model TEXT;
+	ALTER TABLE dispatches ADD COLUMN account TEXT;
+	ALTER TABLE dispatches ADD COLUMN profile TEXT;
+	ALTER TABLE dispatches ADD COLUMN model TEXT;
+	CREATE TABLE dispatch_reports(
+		dispatch_id TEXT NOT NULL REFERENCES dispatches(id),
+		message_id TEXT PRIMARY KEY REFERENCES messages(id),
+		late INTEGER NOT NULL DEFAULT 0);
+	INSERT INTO dispatch_reports(dispatch_id,message_id,late)
+		SELECT id,done_message_id,0 FROM dispatches
+		WHERE done_message_id IN (SELECT id FROM messages);
+	CREATE INDEX dispatch_reports_dispatch ON dispatch_reports(dispatch_id);`,
+	// 6: durable terminal delivery and pickup evidence, separate from mailbox reads.
+	`ALTER TABLE messages ADD COLUMN delivery_status TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE messages ADD COLUMN delivered_at INTEGER;
+ ALTER TABLE messages ADD COLUMN picked_up_at INTEGER;
+ ALTER TABLE messages ADD COLUMN pickup_via TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN delivery_error TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate() error {

@@ -6,25 +6,32 @@ import (
 )
 
 type Message struct {
-	ID        string `json:"id"`
-	RunID     string `json:"run_id,omitempty"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Subject   string `json:"subject,omitempty"`
-	Body      string `json:"body,omitempty"`
-	Kind      string `json:"kind"`
-	TaskID    string `json:"task_id,omitempty"`
-	ReplyTo   string `json:"reply_to,omitempty"`
-	Outcome   string `json:"outcome,omitempty"`
-	CreatedAt int64  `json:"created_at"`
-	ReadAt    int64  `json:"read_at,omitempty"`
+	DeliveryStatus   string `json:"delivery_status,omitempty"`
+	DeliveryAttempts int    `json:"delivery_attempts,omitempty"`
+	DeliveredAt      int64  `json:"delivered_at,omitempty"`
+	PickedUpAt       int64  `json:"picked_up_at,omitempty"`
+	PickupVia        string `json:"pickup_via,omitempty"`
+	DeliveryError    string `json:"delivery_error,omitempty"`
+	ID               string `json:"id"`
+	RunID            string `json:"run_id,omitempty"`
+	From             string `json:"from"`
+	To               string `json:"to"`
+	Subject          string `json:"subject,omitempty"`
+	Body             string `json:"body,omitempty"`
+	Kind             string `json:"kind"`
+	TaskID           string `json:"task_id,omitempty"`
+	ReplyTo          string `json:"reply_to,omitempty"`
+	Outcome          string `json:"outcome,omitempty"`
+	CreatedAt        int64  `json:"created_at"`
+	ReadAt           int64  `json:"read_at,omitempty"`
 }
 
-const msgCols = `id,COALESCE(run_id,''),from_pane,to_pane,subject,body,kind,COALESCE(task_id,''),COALESCE(reply_to,''),COALESCE(outcome,''),created_at,COALESCE(read_at,0)`
+const msgCols = `id,COALESCE(run_id,''),from_pane,to_pane,subject,body,kind,COALESCE(task_id,''),COALESCE(reply_to,''),COALESCE(outcome,''),created_at,COALESCE(read_at,0),delivery_status,delivery_attempts,COALESCE(delivered_at,0),COALESCE(picked_up_at,0),pickup_via,delivery_error`
 
 func scanMsg(r interface{ Scan(...any) error }) (Message, error) {
 	var m Message
-	err := r.Scan(&m.ID, &m.RunID, &m.From, &m.To, &m.Subject, &m.Body, &m.Kind, &m.TaskID, &m.ReplyTo, &m.Outcome, &m.CreatedAt, &m.ReadAt)
+	err := r.Scan(&m.ID, &m.RunID, &m.From, &m.To, &m.Subject, &m.Body, &m.Kind, &m.TaskID, &m.ReplyTo, &m.Outcome, &m.CreatedAt, &m.ReadAt, &m.DeliveryStatus, &m.DeliveryAttempts, &m.DeliveredAt, &m.PickedUpAt, &m.PickupVia, &m.DeliveryError)
+	m = readReceipt(m)
 	return m, err
 }
 
@@ -65,8 +72,8 @@ func insertMessage(q querier, m Message, now int64) (string, error) {
 	if m.To == Daemon {
 		readAt = now
 	}
-	_, err = q.Exec(`INSERT INTO messages(id,run_id,from_pane,to_pane,subject,body,kind,task_id,reply_to,outcome,created_at,read_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, nullStr(m.RunID), m.From, m.To, m.Subject, m.Body, m.Kind, nullStr(m.TaskID), nullStr(m.ReplyTo), nullStr(m.Outcome), now, readAt)
+	_, err = q.Exec(`INSERT INTO messages(id,run_id,from_pane,to_pane,subject,body,kind,task_id,reply_to,outcome,created_at,read_at,delivery_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, nullStr(m.RunID), m.From, m.To, m.Subject, m.Body, m.Kind, nullStr(m.TaskID), nullStr(m.ReplyTo), nullStr(m.Outcome), now, readAt, m.DeliveryStatus)
 	return id, err
 }
 
@@ -117,6 +124,7 @@ func (s *Store) Unread(recipients []string, mark bool) ([]Message, error) {
 				return err
 			}
 			msgs[i].ReadAt = now
+			msgs[i] = readReceipt(msgs[i])
 		}
 		return nil
 	})
@@ -162,7 +170,7 @@ func (s *Store) TakeReply(question string) (Message, error) {
 		m.ReadAt = s.now()
 		_, err = s.db.Exec(`UPDATE messages SET read_at=? WHERE id=?`, m.ReadAt, m.ID)
 	}
-	return m, err
+	return readReceipt(m), err
 }
 
 // OpenAttention keeps unanswered questions visible even after they were read,

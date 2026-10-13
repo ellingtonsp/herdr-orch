@@ -10,6 +10,9 @@ type Dispatch struct {
 	RunID               string `json:"run_id"`
 	PaneID              string `json:"pane_id"`
 	Agent               string `json:"agent,omitempty"`
+	Account             string `json:"account,omitempty"`
+	Profile             string `json:"profile,omitempty"`
+	Model               string `json:"model,omitempty"`
 	PromptHash          string `json:"prompt_hash,omitempty"`
 	Status              string `json:"status"`
 	SawWorking          bool   `json:"saw_working"`
@@ -29,11 +32,11 @@ func (d Dispatch) Active() bool {
 	return d.Status == DispatchPending || d.Status == DispatchDispatched
 }
 
-const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,'')`
+const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanDisp(r interface{ Scan(...any) error }) (Dispatch, error) {
 	var d Dispatch
-	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome)
+	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.Account, &d.Profile, &d.Model)
 	return d, err
 }
 
@@ -64,7 +67,7 @@ func (s *Store) GetDispatch(id string) (Dispatch, error) {
 
 // DispatchesForTask lists every dispatch of a task, oldest first.
 func (s *Store) DispatchesForTask(task string) ([]Dispatch, error) {
-	return s.queryDisps(`SELECT `+dispCols+` FROM dispatches WHERE task_id=? ORDER BY started_at, id`, task)
+	return s.queryDisps(`SELECT `+dispCols+` FROM dispatches WHERE task_id=? ORDER BY started_at, CAST(SUBSTR(id,2) AS INTEGER)`, task)
 }
 
 // ActiveDispatches lists unsettled dispatches.
@@ -113,8 +116,9 @@ func (s *Store) BeginDispatch(taskID, pane, agent, promptHash string) (Dispatch,
 			return err
 		}
 		now := s.now()
-		if _, err := tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at) VALUES(?,?,?,?,?,?,?,?)`,
-			id, taskID, t.RunID, pane, nullStr(agent), nullStr(promptHash), DispatchPending, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at,account,profile,model)
+			VALUES(?,?,?,?,?,?,?,?,(SELECT account FROM workers WHERE pane_id=?),(SELECT profile FROM workers WHERE pane_id=?),(SELECT model FROM workers WHERE pane_id=?))`,
+			id, taskID, t.RunID, pane, nullStr(agent), nullStr(promptHash), DispatchPending, now, pane, pane, pane); err != nil {
 			return err
 		}
 		_, err = tx.Exec(`UPDATE tasks SET status=?, assignee_pane_id=?, attempts=attempts+1, updated_at=? WHERE id=?`, TaskDispatched, pane, now, taskID)
@@ -159,6 +163,73 @@ func (s *Store) RecordDone(id, messageID, outcome string) (Dispatch, error) {
 		return Dispatch{}, err
 	}
 	return s.GetDispatch(id)
+}
+
+// CompletionReport records a worker report and the dispatch it belongs to. Late
+// reports are notes and never change the closed dispatch or its task.
+type CompletionReport struct {
+	Message  Message  `json:"message"`
+	Dispatch Dispatch `json:"dispatch"`
+	Late     bool     `json:"late"`
+}
+
+// RecordDispatchReport persists the message and association atomically, enforcing
+// the latest dispatch's assignee even for callers that are not pane-shaped IDs.
+func (s *Store) RecordDispatchReport(id string, m Message) (CompletionReport, error) {
+	var report CompletionReport
+	err := s.tx(func(tx *sql.Tx) error {
+		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, id))
+		if err == sql.ErrNoRows {
+			return refuse("unknown_dispatch", "no dispatch %q", id)
+		} else if err != nil {
+			return err
+		}
+		var latest string
+		if err := tx.QueryRow(`SELECT id FROM dispatches WHERE task_id=? ORDER BY started_at DESC, CAST(SUBSTR(id,2) AS INTEGER) DESC LIMIT 1`, d.TaskID).Scan(&latest); err != nil {
+			return err
+		}
+		if latest != id {
+			return refuse("not_latest_dispatch", "dispatch %s is no longer the latest dispatch of task %s", id, d.TaskID)
+		}
+		if m.From != d.PaneID {
+			return refuse("not_assignee", "task %s is dispatched to %s, not %s", d.TaskID, d.PaneID, m.From)
+		}
+		report.Late = !d.Active()
+		if !report.Late && d.DoneMessageID != "" {
+			return refuse("already_done", "dispatch %s already has a done report (%s)", d.ID, d.DoneMessageID)
+		}
+		m.RunID, m.TaskID, m.To, m.Kind = d.RunID, d.TaskID, Daemon, KindDone
+		if report.Late {
+			m.Kind = KindNote
+		}
+		m.ID, err = insertMessage(tx, m, s.now())
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO dispatch_reports(dispatch_id,message_id,late) VALUES(?,?,?)`, id, m.ID, report.Late); err != nil {
+			return err
+		}
+		if !report.Late {
+			if _, err := tx.Exec(`UPDATE dispatches SET done_message_id=?, done_outcome=? WHERE id=?`, m.ID, m.Outcome, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return report, err
+	}
+	report.Message, err = s.GetMessage(m.ID)
+	if err != nil {
+		return report, err
+	}
+	report.Dispatch, err = s.GetDispatch(id)
+	return report, err
+}
+
+// DispatchReports returns every persisted worker report, including late notes.
+func (s *Store) DispatchReports(id string) ([]Message, error) {
+	return s.queryMsgs(`SELECT `+msgCols+` FROM messages WHERE id IN (SELECT message_id FROM dispatch_reports WHERE dispatch_id=?) ORDER BY created_at, CAST(SUBSTR(id,2) AS INTEGER)`, id)
 }
 
 func (s *Store) MarkIdleEscalated(id string) error {

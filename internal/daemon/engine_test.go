@@ -187,6 +187,8 @@ func newHarness(t *testing.T) *harness {
 	cfg.UserConfig = func() (config.Config, error) { return x.user, nil }
 	x.e = NewEngine(st, x.h, cfg)
 	x.e.logf = t.Logf
+	x.e.deliveryLaunch = func(func()) {} // Delivery scenarios run explicitly in delivery_test.go.
+	t.Cleanup(x.e.CloseDeliveries)
 	x.e.promptRetry = time.Millisecond
 	x.e.startGrace = 50 * time.Millisecond
 	x.e.async = func(f func()) { x.qmu.Lock(); x.q = append(x.q, f); x.qmu.Unlock() }

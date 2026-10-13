@@ -94,6 +94,11 @@ func Run(ctx context.Context, o Options) error {
 	}()
 	logf("herdr-orch %s up: session=%s herdr=%s protocol=%d db=%s sock=%s", Version, p.Session, pong.Version, pong.Protocol, p.DB, p.Sock)
 
+	defer e.CloseDeliveries()
+	if err := e.RecoverDeliveries(); err != nil {
+		return err
+	}
+
 	ops := e.Ops()
 	ops["ping"] = func(context.Context, string, json.RawMessage) (any, error) {
 		return map[string]any{"version": Version, "session": p.Session, "pid": os.Getpid(), "herdr": pong.Version, "protocol": pong.Protocol, "watching": e.WatchSet()}, nil

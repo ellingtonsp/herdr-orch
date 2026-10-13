@@ -9,6 +9,9 @@ type Worker struct {
 	RunID       string `json:"run_id,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Agent       string `json:"agent,omitempty"`
+	Account     string `json:"account,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Model       string `json:"model,omitempty"`
 	Worktree    string `json:"worktree,omitempty"`
 	State       string `json:"state"`
 	Retained    bool   `json:"retained"`
@@ -19,21 +22,23 @@ type Worker struct {
 	Note        string `json:"note,omitempty"`
 }
 
-const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,retained,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,'')`
+const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,retained,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanWorker(r interface{ Scan(...any) error }) (Worker, error) {
 	var w Worker
-	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.Retained, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note)
+	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.Retained, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note, &w.Account, &w.Profile, &w.Model)
 	return w, err
 }
 
 // RegisterWorker records a live worker (insert or revive).
 func (s *Store) RegisterWorker(w Worker) (Worker, error) {
 	now := s.now()
-	_, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at) VALUES(?,?,?,?,?,?,?)
+	_, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(pane_id) DO UPDATE SET run_id=excluded.run_id, name=excluded.name, agent=excluded.agent,
-		worktree=excluded.worktree, state=excluded.state, released_at=NULL, flagged_at=NULL`,
-		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now)
+		worktree=excluded.worktree, account=excluded.account, profile=excluded.profile, model=excluded.model,
+		state=excluded.state, released_at=NULL, flagged_at=NULL`,
+		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now,
+		nullStr(w.Account), nullStr(w.Profile), nullStr(w.Model))
 	if err != nil {
 		return Worker{}, err
 	}

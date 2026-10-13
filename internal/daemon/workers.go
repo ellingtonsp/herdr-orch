@@ -23,6 +23,11 @@ type WorkerStartArgs struct {
 	Name  string   `json:"name,omitempty"`
 	Cwd   string   `json:"cwd,omitempty"`
 	Args  []string `json:"args,omitempty"`
+	// Account and Profile record launch labels; agent-specific selection flags go
+	// in Args. Model is the requested launch model, never effective-model proof.
+	Account string `json:"account,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Model   string `json:"model,omitempty"`
 	// Pane starts the agent in an existing shell pane (e.g. the root pane of a workspace
 	// made by `herdr worktree create`) instead of opening a new tab.
 	Pane string `json:"pane,omitempty"`
@@ -44,6 +49,19 @@ func (e *Engine) opWorkerStart(ctx context.Context, caller string, raw json.RawM
 func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartArgs) (store.Worker, error) {
 	if a.Agent == "" {
 		return store.Worker{}, refusal("bad_args", "--agent is required (claude|pi|codex|...)")
+	}
+	// Retain supplied launch arguments verbatim. An explicit requested model is
+	// added only when no model was already supplied to the agent.
+	if supplied := launchArg(a.Args, "--model", "-m"); supplied != "" {
+		a.Model = supplied
+	} else if a.Model != "" {
+		a.Args = append(append([]string(nil), a.Args...), "--model", a.Model)
+	}
+	if a.Account == "" {
+		a.Account = launchArg(a.Args, "--account")
+	}
+	if a.Profile == "" {
+		a.Profile = launchArg(a.Args, "--profile")
 	}
 	run, err := e.runFor(caller, a.Run)
 	if err != nil {
@@ -135,7 +153,7 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd})
+	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, Account: a.Account, Profile: a.Profile, Model: a.Model})
 	if err != nil {
 		return w, err
 	}

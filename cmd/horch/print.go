@@ -138,8 +138,17 @@ func printMessages(raw json.RawMessage) {
 		if m.ReplyTo != "" {
 			head += " · re " + m.ReplyTo
 		}
+		if m.DeliveryStatus != "" {
+			head += " · delivery=" + m.DeliveryStatus
+			if m.PickupVia != "" {
+				head += " (" + m.PickupVia + ")"
+			}
+		}
 		head += " · " + ago(m.CreatedAt) + " ago"
 		fmt.Println(head)
+		if m.DeliveryError != "" {
+			fmt.Println("Delivery: " + m.DeliveryError)
+		}
 		if m.Subject != "" {
 			fmt.Println(m.Subject)
 		}
@@ -159,14 +168,14 @@ func printSent(raw json.RawMessage) {
 		return
 	}
 	for _, m := range ms {
-		fmt.Printf("sent %s (%s) → %s\n", m.ID, m.Kind, m.To)
+		fmt.Printf("sent %s (%s) → %s [%s]\n", m.ID, m.Kind, m.To, or(m.DeliveryStatus, "mailbox"))
 	}
 }
 
 func printWorker(raw json.RawMessage) {
 	var w store.Worker
 	_ = json.Unmarshal(raw, &w)
-	fmt.Printf("%s  %s  %s  [%s]  %s\n", w.PaneID, or(w.Name, "-"), or(w.Agent, "-"), w.State, w.Worktree)
+	fmt.Printf("%s  %s  %s  [%s]  %s  account=%s profile=%s model=%s\n", w.PaneID, or(w.Name, "-"), or(w.Agent, "-"), w.State, w.Worktree, or(w.Account, "-"), or(w.Profile, "-"), or(w.Model, "-"))
 }
 
 func printWorkers(raw json.RawMessage) {

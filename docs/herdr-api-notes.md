@@ -115,3 +115,15 @@ Release verifies this the same way: record pids, close, poll `kill(pid, 0)`.
    `horch` stays a standalone binary (symlinked onto `PATH` by `make install`).
 2. **Does startup survive `live_handoff`?** The old process survives *and* a new one is
    started. Handled by the takeover lock above.
+
+## Message delivery transport
+
+Mailbox sends now distinguish accepted terminal writes from pickup. The
+[herdr CLI reference](https://herdr.dev/docs/cli-reference/) documents that `agent.prompt`
+honors live bracketed-paste mode and that success without waiting acknowledges writes,
+not the start of an agent turn. Sends preserve the complete prompt through that API,
+observe subsequent working state or mailbox acknowledgement, and make one bounded retry.
+Known collapsed-paste indicators trigger Enter on the existing composer after rechecking
+readiness. Legacy report-agent fallback separates text and Enter to allow paste buffering.
+Transport and state-machine behavior have synthetic socket tests; they do not constitute
+live verification of every installed agent UI version.

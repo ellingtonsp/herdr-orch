@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Message delivery receipts.** Sends and replies wait for an interactive idle agent,
+  track submission separately from pickup, recover collapsed pastes, retry once and
+  escalate unconfirmed delivery. `send --wait-pickup [--timeout D]` waits for evidence;
+  `inbox` shows receipts. Queued jobs survive restarts; uncertain writes are escalated.
+- **Mailbox ownership.** A single-consumer lease refuses competing destructive checks
+  with the holder's identity. `check --peek` is non-destructive; new `ack --id` acknowledges
+  one recipient-owned message. Leases release on timeout, cancellation and disconnect.
+- **Completion reports.** Late `done --task` reports append notes to the latest closed
+  dispatch without changing its result. Report history is included in dispatch show.
+  Worker launch account/profile labels and requested model are persisted, snapshotted
+  per dispatch, and surfaced in completion notifications.
+
 - **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
   The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change
   goes through the store. Writes take `--if-version` (optimistic concurrency) and append to an

@@ -29,11 +29,11 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch run update [--run R] [--status S] [--coordinator me|PANE] [--auto on|off] [--max-attempts N]
                    [--idle-report 10m] [--flag-idle 30m|0]
 
-  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation]
+  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation] [--wait-pickup] [--timeout 5m]
   horch done [--task T] --body B [--failed]          (report a dispatched task finished)
   horch check [--wait] [--timeout 10m] [--peek]      horch inbox [--all] [--limit N]
   horch ask [--to coordinator] --question Q [--timeout 30m]   (blocks until replied)
-  horch reply --id MSG --body B
+  horch reply --id MSG --body B                   horch ack --id MSG
 
   horch task create --title T [--spec S | --spec-file F] [--deps a,b]
   horch task list | show --id T | update --id T [--status S] [--deps a,b] [--reset-attempts] ...
@@ -42,7 +42,7 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch dispatch nudge --task T [--text S] [--force]  (remind an idle worker to report)
   horch dispatch fail --task T --reason R            (coordinator declares it failed)
 
-  horch worker start --agent claude|pi|codex [--worktree DIR | --pane PANE] [--name N] [-- agent args]
+  horch worker start --agent claude|pi|codex [--worktree DIR | --pane PANE] [--name N] [--account LABEL] [--profile LABEL] [--model ID] [-- agent args]
   horch worker register [--pane PANE] [--name N]
   horch worker show|read|stop|release|retain|abandon --worker PANE|NAME [--force] [--lines N] [--off]
   horch worker list [--all]
@@ -192,6 +192,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return cmdDone(ctx, rest)
 	case "check":
 		return cmdCheck(ctx, rest)
+	case "ack":
+		return cmdAck(ctx, rest)
 	case "ask":
 		return cmdAsk(ctx, rest)
 	case "reply":
@@ -371,6 +373,8 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 func cmdSend(ctx context.Context, args []string) error {
 	f := fs("send")
 	a := daemon.SendArgs{}
+	f.BoolVar(&a.WaitPickup, "wait-pickup", false, "")
+	timeout := f.String("timeout", "", "")
 	f.StringVar(&a.Run, "run", "", "")
 	f.StringVar(&a.To, "to", "", "")
 	f.StringVar(&a.Subject, "subject", "", "")
@@ -381,6 +385,11 @@ func cmdSend(ctx context.Context, args []string) error {
 	if _, err := parse(f, args); err != nil {
 		return err
 	}
+	ms, err := durMS(*timeout)
+	if err != nil {
+		return err
+	}
+	a.TimeoutMS = ms
 	if a.Kind == store.KindDone && a.To == "" {
 		a.To = store.Daemon
 	}
@@ -408,8 +417,13 @@ func cmdDone(ctx context.Context, args []string) error {
 	return run(ctx, "send", a, func(raw json.RawMessage) {
 		var r struct {
 			Dispatch store.Dispatch `json:"dispatch"`
+			Late     bool           `json:"late"`
 		}
 		_ = json.Unmarshal(raw, &r)
+		if r.Late {
+			fmt.Printf("recorded late note for task %s (dispatch %s remains %s)\n", r.Dispatch.TaskID, r.Dispatch.ID, r.Dispatch.Status)
+			return
+		}
 		fmt.Printf("reported %s for task %s (dispatch %s is %s)\n", map[bool]string{true: "failure", false: "done"}[a.Failed], r.Dispatch.TaskID, r.Dispatch.ID, r.Dispatch.Status)
 	})
 }
@@ -426,7 +440,30 @@ func cmdCheck(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return run(ctx, "check", daemon.CheckArgs{Wait: *wait, TimeoutMS: ms, Peek: *peek}, printMessages)
+	return run(ctx, "check", daemon.CheckArgs{Wait: *wait, TimeoutMS: ms, Peek: *peek, Consumer: consumerLabel()}, printMessages)
+}
+
+// consumerLabel names this process in mailbox lease refusals.
+func consumerLabel() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("%s:%d", host, os.Getpid())
+}
+
+func cmdAck(ctx context.Context, args []string) error {
+	f := fs("ack")
+	a := daemon.AckArgs{Consumer: consumerLabel()}
+	f.StringVar(&a.ID, "id", "", "")
+	if _, err := parse(f, args); err != nil {
+		return err
+	}
+	return run(ctx, "ack", a, func(raw json.RawMessage) {
+		var m store.Message
+		_ = json.Unmarshal(raw, &m)
+		fmt.Printf("acknowledged %s\n", m.ID)
+	})
 }
 
 func cmdAsk(ctx context.Context, args []string) error {
@@ -605,6 +642,9 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	runID := f.String("run", "", "")
 	worker := f.String("worker", "", "")
 	agent := f.String("agent", "", "")
+	account := f.String("account", "", "")
+	profile := f.String("profile", "", "")
+	model := f.String("model", "", "")
 	name := f.String("name", "", "")
 	cwd := f.String("worktree", "", "")
 	f.StringVar(cwd, "cwd", "", "")
@@ -623,7 +663,7 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	ref := daemon.WorkerRef{Worker: *worker, Force: *force, Lines: *lines, Off: *off}
 	switch sub {
 	case "start":
-		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Args: extra, Pane: *pane}, printWorker)
+		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Args: extra, Pane: *pane, Account: *account, Profile: *profile, Model: *model}, printWorker)
 	case "register":
 		if *pane == "" {
 			*pane = pos

@@ -61,6 +61,8 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopCancel()
 	id := fmt.Sprintf("horch-%d", c.seq.Add(1))
 	req, _ := json.Marshal(map[string]any{"id": id, "method": method, "params": params})
 	if _, err := conn.Write(append(req, '\n')); err != nil {
@@ -194,6 +196,36 @@ func (c *Client) AgentPrompt(ctx context.Context, target, text string) error {
 // SendText types text into a pane and presses Enter (fallback for agents herdr did not start).
 func (c *Client) SendText(ctx context.Context, paneID, text string) error {
 	if err := c.Call(ctx, "pane.send_text", map[string]any{"pane_id": paneID, "text": text}, nil); err != nil {
+		return err
+	}
+	// Give paste buffering UIs a boundary before the submit key.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(350 * time.Millisecond):
+	}
+	return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": []string{"enter"}}, nil)
+}
+
+// SubmitPending retries only Enter, retaining the existing collapsed paste.
+func (c *Client) SubmitPending(ctx context.Context, paneID string) error {
+	p, err := c.PaneGet(ctx, paneID)
+	if err != nil {
+		return err
+	}
+	if p.Agent == nil || *p.Agent == "" || (p.AgentStatus != "idle" && p.AgentStatus != "done") || (p.InteractiveReady != nil && !*p.InteractiveReady) {
+		return fmt.Errorf("pane %s no longer has an idle agent", paneID)
+	}
+	a, err := c.AgentGet(ctx, paneID)
+	if err == nil {
+		if a.InteractiveReady != nil && !*a.InteractiveReady {
+			return fmt.Errorf("agent is not interactive")
+		}
+		if a.AgentStatus != "" && a.AgentStatus != "idle" && a.AgentStatus != "done" {
+			return fmt.Errorf("agent is no longer idle")
+		}
+	}
+	if err != nil && ErrCode(err) != "agent_not_found" && ErrCode(err) != "agent_not_ready" {
 		return err
 	}
 	return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": []string{"enter"}}, nil)
