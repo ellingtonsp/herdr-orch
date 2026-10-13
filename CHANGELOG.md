@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Process hygiene.** Worker release discovers detached helpers by worktree cwd on
+  macOS/Linux, rechecks identity and scope before TERM/KILL, protects orchestration
+  processes and reports outcomes. `horch sweep [--dry-run]` handles recorded released
+  or removed worktrees while excluding reused live scopes.
+- **Resource leases.** `horch lease acquire|release|list`, optional `--ttl`, and repeatable
+  dispatch `--lease` reserve named simulator, port and database resources across sessions.
+  Successful worker release frees leases; conflicts name the holder.
+- **Admission control.** `horch run update --max-load N --min-free-mem PCT` adds optional
+  macOS/Linux capacity checks before manual or automatic dispatch, with explicit refusals.
+
 - **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
   The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change
   goes through the store. Writes take `--if-version` (optimistic concurrency) and append to an

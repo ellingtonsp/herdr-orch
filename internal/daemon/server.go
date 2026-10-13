@@ -63,7 +63,7 @@ func Run(ctx context.Context, o Options) error {
 		return errors.New(msg)
 	}
 
-	st, err := store.Open(p.DB)
+	st, err := store.OpenWithLeaseRegistry(p.DB, p.LeaseDB)
 	if err != nil {
 		return err
 	}

@@ -676,13 +676,16 @@ func TestSendToRunBroadcasts(t *testing.T) {
 	}
 }
 
-func startSleeper(t *testing.T, ignoreHUP bool) int {
+func startSleeper(t *testing.T, ignoreHUP bool, dirs ...string) int {
 	t.Helper()
 	script := "exec sleep 60"
 	if ignoreHUP {
 		script = "trap '' HUP TERM; while :; do sleep 0.1; done"
 	}
 	cmd := exec.Command("sh", "-c", script)
+	if len(dirs) > 0 {
+		cmd.Dir = dirs[0]
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +711,11 @@ func TestReleaseVerifiesProcessesGone(t *testing.T) {
 func TestReleaseKillsStragglers(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	pid := startSleeper(t, true) // ignores HUP and TERM: needs SIGKILL
+	dir := t.TempDir()
+	w, _ := x.st.GetWorker("w1:p2")
+	w.Worktree = dir
+	x.st.RegisterWorker(w)
+	pid := startSleeper(t, true, dir) // ignores HUP and TERM: needs SIGKILL
 	x.h.pids["w1:p2"] = []int{pid}
 	var res CloseResult
 	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:p2"}, &res)
@@ -898,7 +905,8 @@ func TestWorkerStartInExistingPane(t *testing.T) {
 	x.h.panes["w2:p1"].Agent = nil
 	var w store.Worker
 	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "codex", Name: "it-codex", Pane: "w2:p1"}, &w)
-	if w.PaneID != "w2:p1" || w.Worktree != cwd || x.h.nextPane != 0 {
+	canonical, _ := processRoot(cwd)
+	if w.PaneID != "w2:p1" || w.Worktree != canonical || x.h.nextPane != 0 {
 		t.Fatalf("worker %+v newTabs=%d", w, x.h.nextPane)
 	}
 	_, err := x.op(coord, "worker.start", WorkerStartArgs{Agent: "pi", Pane: "w2:p1", Name: "again"})

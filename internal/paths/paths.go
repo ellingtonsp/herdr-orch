@@ -18,6 +18,7 @@ const PluginID = "herdr-orch"
 type Paths struct {
 	Session   string
 	Dir       string
+	LeaseDB   string
 	DB        string
 	Sock      string
 	Lock      string
@@ -99,6 +100,7 @@ func Resolve() (Paths, error) {
 		Session:   sess,
 		Dir:       dir,
 		DB:        filepath.Join(dir, "orch.db"),
+		LeaseDB:   filepath.Join(stateBase(), "leases.db"),
 		Sock:      sock,
 		Lock:      filepath.Join(dir, "orch.lock"),
 		Log:       filepath.Join(dir, "daemon.log"),

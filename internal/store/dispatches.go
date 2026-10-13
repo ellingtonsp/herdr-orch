@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"time"
 )
 
 type Dispatch struct {
@@ -85,8 +86,33 @@ func (s *Store) ActiveDispatchForPane(pane string) (Dispatch, error) {
 // `pending`. Refuses when the task is not ready, already has an active dispatch, the pane
 // is busy with another dispatch, or the circuit breaker is open.
 func (s *Store) BeginDispatch(taskID, pane, agent, promptHash string) (Dispatch, error) {
+	return s.BeginDispatchWithLeases(taskID, pane, agent, promptHash, nil, DefaultLeaseTTL)
+}
+
+func (s *Store) BeginDispatchWithLeases(taskID, pane, agent, promptHash string, resources []string, ttl time.Duration) (Dispatch, error) {
+	normalized := []string{}
+	for _, resource := range resources {
+		r, err := NormalizeResource(resource)
+		if err != nil {
+			return Dispatch{}, err
+		}
+		normalized = append(normalized, r)
+	}
+	now := s.now()
+	expires, err := leaseExpiry(now, ttl)
+	if err != nil {
+		return Dispatch{}, err
+	}
 	var id string
-	err := s.tx(func(tx *sql.Tx) error {
+	err = s.tx(func(tx *sql.Tx) error {
+		if len(normalized) > 0 {
+			if err := expireLeases(tx, now); err != nil {
+				return err
+			}
+			if err := leaseWorker(tx, pane); err != nil {
+				return err
+			}
+		}
 		t, err := getTask(tx, taskID)
 		if err != nil {
 			return err
@@ -116,6 +142,11 @@ func (s *Store) BeginDispatch(taskID, pane, agent, promptHash string) (Dispatch,
 		if _, err := tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at) VALUES(?,?,?,?,?,?,?,?)`,
 			id, taskID, t.RunID, pane, nullStr(agent), nullStr(promptHash), DispatchPending, now); err != nil {
 			return err
+		}
+		for _, resource := range normalized {
+			if err := acquireLease(tx, resource, pane, s.leaseScope, id, now, expires, false); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(`UPDATE tasks SET status=?, assignee_pane_id=?, attempts=attempts+1, updated_at=? WHERE id=?`, TaskDispatched, pane, now, taskID)
 		if err != nil {
@@ -248,6 +279,15 @@ func (s *Store) Settle(id string, success bool, outcome, result string) (Settlem
 // Fence settles an active dispatch as failed without counting the attempt (the worker was
 // stopped or abandoned, not at fault). The task returns to ready.
 func (s *Store) Fence(id, reason string) (Settlement, error) {
+	return s.fence(id, reason, false)
+}
+
+// FenceUnsent rolls back only resources first claimed by a prompt that was not delivered.
+// Worker stop/release fences must retain resources until process cleanup is verified.
+func (s *Store) FenceUnsent(id, reason string) (Settlement, error) {
+	return s.fence(id, reason, true)
+}
+func (s *Store) fence(id, reason string, releaseUnsent bool) (Settlement, error) {
 	var st Settlement
 	err := s.tx(func(tx *sql.Tx) error {
 		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, id))
@@ -267,6 +307,14 @@ func (s *Store) Fence(id, reason string) (Settlement, error) {
 		t, err := getTask(tx, d.TaskID)
 		if err != nil {
 			return err
+		}
+		if releaseUnsent {
+			if d.Status != DispatchPending {
+				return refuse("dispatch_sent", "dispatch %s was already submitted; leases must be retained", id)
+			}
+			if _, err := tx.Exec(`DELETE FROM lease_registry.leases WHERE dispatch_id=? AND scope=?`, id, s.leaseScope); err != nil {
+				return err
+			}
 		}
 		st.NowReady, err = refreshReadiness(tx, t.RunID, now)
 		return err
