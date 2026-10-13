@@ -39,10 +39,13 @@ func (e *Engine) Ops() map[string]Handler {
 		"dispatch.next":   e.opDispatchNext,
 		"dispatch.nudge":  e.opDispatchNudge,
 		"dispatch.fail":   e.opDispatchFail,
+		"dispatch.hold":   e.opDispatchHold,
+		"dispatch.resume": e.opDispatchResume,
 		"gate.create":     e.opGateCreate,
 		"gate.resolve":    e.opGateResolve,
 		"gate.list":       e.opGateList,
 		"worker.start":    e.opWorkerStart,
+		"worker.restart":  e.opWorkerRestart,
 		"worker.show":     e.opWorkerShow,
 		"worker.read":     e.opWorkerRead,
 		"worker.list":     e.opWorkerList,
@@ -381,6 +384,9 @@ func (e *Engine) done(caller string, a SendArgs) (any, error) {
 		if err != nil {
 			return nil, refusal("no_active_dispatch", "pane %s has no active dispatch; pass --task", caller)
 		}
+	}
+	if e.st.WorkerLifecycleHeld(d.PaneID) {
+		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
 	}
 	if d.DoneMessageID != "" {
 		return nil, refusal("already_done", "dispatch %s already has a done report (%s)", d.ID, d.DoneMessageID)
@@ -753,6 +759,10 @@ func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dis
 		agent = *info.Agent
 	}
 	e.mu.Lock()
+	if e.st.WorkerLifecycleHeld(pane) {
+		e.mu.Unlock()
+		return store.Dispatch{}, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
+	}
 	t, err := e.st.GetTask(taskID)
 	if err != nil {
 		e.mu.Unlock()
@@ -931,7 +941,7 @@ func (e *Engine) idleWorkersLocked(run string) []store.Worker {
 	}
 	var out []store.Worker
 	for _, w := range ws {
-		if w.State != store.WorkerLive || w.Retained {
+		if w.State != store.WorkerLive || w.Retained || w.Lifecycle != "" {
 			// Retained workers (e.g. a PR owner waiting on its merge) are reserved.
 			continue
 		}
@@ -981,6 +991,7 @@ func (e *Engine) autoDispatchLocked(run string) {
 }
 
 type DispatchActArgs struct {
+	Infra  bool   `json:"infra,omitempty"`
 	Task   string `json:"task"`
 	Reason string `json:"reason,omitempty"`
 	Text   string `json:"text,omitempty"`
@@ -1013,7 +1024,11 @@ func (e *Engine) opDispatchNudge(ctx context.Context, _ string, raw json.RawMess
 	e.mu.Lock()
 	d, err := e.activeDispatchForTask(a.Task)
 	status := e.status[d.PaneID]
+	held := e.st.WorkerLifecycleHeld(d.PaneID)
 	e.mu.Unlock()
+	if held {
+		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1063,7 +1078,15 @@ func (e *Engine) opDispatchFail(_ context.Context, caller string, raw json.RawMe
 	if err != nil {
 		return nil, err
 	}
-	st, err := e.st.Settle(d.ID, false, "failed: "+a.Reason+" (by "+caller+")", "")
+	if e.st.WorkerLifecycleHeld(d.PaneID) {
+		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
+	}
+	var st store.Settlement
+	if a.Infra {
+		st, err = e.st.Fence(d.ID, "infrastructure: "+a.Reason+" (by "+caller+")")
+	} else {
+		st, err = e.st.Settle(d.ID, false, "failed: "+a.Reason+" (by "+caller+")", "")
+	}
 	if err != nil {
 		return nil, err
 	}

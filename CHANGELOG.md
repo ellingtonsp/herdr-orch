@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Dispatch lifecycle:** `dispatch hold --until <RFC3339|duration|event:name> --reason ...`
+  and `dispatch resume` persist intentional waits. Usage-cap screens raise one escalation
+  and auto-hold until reset (explicit resume when unknown). `dispatch fail --infra` refunds
+  the interrupted attempt.
+- **Worker recovery:** `worker restart --worker W [--env KEY=VAL] [--unset KEY]` verifies clean
+  agent exit and shell environment before relaunching with saved arguments and re-dispatching
+  the same task without another attempt. `worker release --hand-off-to W` records a transfer
+  to a live owner in the same worktree, allowing unsaved helper work without `--force`.
+
 - **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
   The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change
   goes through the store. Writes take `--if-version` (optimistic concurrency) and append to an
