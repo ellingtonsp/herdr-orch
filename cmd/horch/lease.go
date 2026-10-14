@@ -81,6 +81,9 @@ func cmdSweep(ctx context.Context, args []string) error {
 func printProcessOutcomes(ps []daemon.ProcessOutcome) {
 	for _, p := range ps {
 		fmt.Printf("  %s pid=%d command=%q cwd=%q", p.Action, p.PID, p.Command, p.Cwd)
+		if p.Worktree != "" {
+			fmt.Printf(" worktree=%q", p.Worktree)
+		}
 		if p.Error != "" {
 			fmt.Printf(" error=%q", p.Error)
 		}

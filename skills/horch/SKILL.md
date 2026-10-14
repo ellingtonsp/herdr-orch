@@ -163,8 +163,12 @@ Release discovers detached processes by cwd inside the registered worktree, rech
 identity/scope before TERM then KILL, and reports outcomes. It excludes outside processes,
 `herdr*`/`horch*`, the daemon and its ancestors. Shared live/starting worktrees refuse
 ordinary cleanup. Explicit hand-off closes only the source pane and preserves shared helpers. Inventory errors and survivors keep release incomplete and retain leases.
-Sweep only considers recorded released/stopped or missing worktrees; live reused scopes
-are protected. Dry-run sends no signals. Neither command removes worktrees.
+Sweep defaults to no candidates and only allows roots in the worker store for released
+workers or missing paths; live reused scopes are protected. Existing stopped roots do not
+qualify. Both cleanup paths reject home and its parents, `/System`, `/Library`, `/usr`,
+`/Applications`, `~/Library`, their parents, symlink escapes and unknown/other-user
+ownership. Common container roots and OS service executables are also excluded. The same scope and owner check runs before every signal; unsafe release
+roots refuse before pane closure. Reports include the matched worktree. Dry-run sends no signals. Neither command removes worktrees.
 
 ## Gates and schedules
 

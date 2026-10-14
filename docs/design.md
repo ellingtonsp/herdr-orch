@@ -76,7 +76,7 @@ The daemon and its ancestors are protected. Cleanup refuses overlapping live/sta
 worktrees; startup reserves its scope before launch and closing workers cannot be
 registered or dispatched again. New helpers discovered after signaling are handled in
 bounded passes. Unresolved inspection errors or survivors retain resource ownership.
-An explicit `sweep` (optionally `--dry-run`) uses recorded released/stopped or missing
+An explicit `sweep` (optionally `--dry-run`) uses recorded released or missing
 worktrees, excludes reused live scopes, and reports per-process outcomes.
 
 Leases live in a shared `leases.db` at the plugin state root, alongside `sessions/`.
@@ -215,3 +215,14 @@ late reports. Receipt state is durable; per-connection mailbox leases and per-pa
 serialization are daemon-local. Restart resumes only jobs with no submission attempt and
 escalates uncertain writes. Completion report association and message insertion are atomic;
 late notes preserve settlement. Dispatches snapshot launch metadata for historical accuracy.
+
+### Cleanup scope authorization
+
+Sweep authorizes a process only through an explicit worker-store root belonging to a
+released worker or a worktree path missing on disk. Existing stopped roots are not eligible.
+The shared cleanup scope used by release, hand-off, sweep and bounded rescans rejects
+home/system roots and their ancestors, rejects filesystem container roots and OS service
+executables, checks known current-user ownership, resolves cwd
+symlinks, and verifies containment again immediately before every signal. No recorded
+eligible root means no candidates. Reports include the matched root; literal existing
+` (deleted)` directory names are preserved rather than rewritten into sibling worktrees.

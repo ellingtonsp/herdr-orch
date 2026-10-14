@@ -24,7 +24,7 @@ func parseProcessTable(text string, uid int) []ProcessRecord {
 		if err != nil {
 			continue
 		}
-		out = append(out, ProcessRecord{PID: pid, Parent: parent, Started: strings.Join(f[3:8], " "), Command: strings.Join(f[9:], " ")})
+		out = append(out, ProcessRecord{UID: owner, UIDKnown: true, PID: pid, Parent: parent, Started: strings.Join(f[3:8], " "), Command: strings.Join(f[9:], " ")})
 	}
 	return out
 }
@@ -41,7 +41,7 @@ func parseCwdTable(data []byte) map[int]string {
 			pid, _ = strconv.Atoi(field[1:])
 		case 'n':
 			if pid > 0 && strings.HasPrefix(field[1:], "/") {
-				out[pid] = strings.TrimSuffix(field[1:], " (deleted)")
+				out[pid] = processCwd(field[1:])
 			}
 		}
 	}

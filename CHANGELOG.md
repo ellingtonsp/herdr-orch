@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Cleanup scope safety.** Sweep defaults to no candidates outside recorded released or
+  missing worker worktrees. Shared cleanup rejects home/system scopes, symlink escapes
+  and unknown/other-user ownership before each signal. Existing stopped roots no longer
+  qualify; unsafe release roots refuse before pane closure. Reports identify the matched
+  worktree and literal deleted-suffix directory names retain their boundaries.
+
 - **Process hygiene.** Worker release discovers detached helpers by worktree cwd on
   macOS/Linux, rechecks identity and scope before TERM/KILL, protects orchestration
   processes and reports outcomes. `horch sweep [--dry-run]` handles recorded released
