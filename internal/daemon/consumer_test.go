@@ -101,7 +101,7 @@ func TestConsumerLeaseReleasedAfterTimeout(t *testing.T) {
 
 func TestConsumerLeaseReleasedAfterSocketDisconnect(t *testing.T) {
 	x := newHarness(t)
-	dir, err := os.MkdirTemp("/private/tmp", "hc-")
+	dir, err := os.MkdirTemp("/tmp", "hc-")
 	if err != nil {
 		t.Fatal(err)
 	}
