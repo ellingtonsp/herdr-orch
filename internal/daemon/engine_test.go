@@ -723,7 +723,7 @@ func TestReleaseVerifiesProcessesGone(t *testing.T) {
 func TestReleaseKillsStragglers(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	dir := t.TempDir()
+	dir := gitWorktree(t)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = dir
 	x.st.RegisterWorker(w)
@@ -754,7 +754,7 @@ func TestReleaseRefusesBusyWorker(t *testing.T) {
 
 func TestReleaseRefusesDirtyWorktree(t *testing.T) {
 	x := newHarness(t)
-	dir := t.TempDir()
+	dir := gitWorktree(t)
 	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "t@t"}, {"config", "user.name", "t"}} {
 		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %s", args, out)

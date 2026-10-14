@@ -79,6 +79,15 @@ func (nativeProcesses) Inspect(ctx context.Context, pid int) (ProcessRecord, err
 		return ProcessRecord{}, err
 	}
 	dir := filepath.Join("/proc", strconv.Itoa(pid))
+	status, err := os.ReadFile(filepath.Join(dir, "status"))
+	if err != nil {
+		return ProcessRecord{}, err
+	}
+	credentials, err := parseProcessCredentials(string(status))
+	if err != nil {
+		return ProcessRecord{}, err
+	}
+
 	b, err := os.ReadFile(filepath.Join(dir, "stat"))
 	if err != nil {
 		return ProcessRecord{}, err
@@ -106,5 +115,5 @@ func (nativeProcesses) Inspect(ctx context.Context, pid int) (ProcessRecord, err
 	if err != nil {
 		return ProcessRecord{}, processFieldError(ctx, dir, "exe", err)
 	}
-	return ProcessRecord{PID: pid, Parent: parent, Started: fields[19], Command: strings.TrimSuffix(command, " (deleted)"), Cwd: strings.TrimSuffix(cwd, " (deleted)")}, nil
+	return ProcessRecord{UID: int(credentials.UIDs[1]), UIDKnown: true, PID: pid, Parent: parent, Started: fields[19], Command: strings.TrimSuffix(command, " (deleted)"), Cwd: processCwd(cwd)}, nil
 }

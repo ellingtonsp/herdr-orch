@@ -240,8 +240,8 @@ dispatches `pending|dispatched|completed|failed|circuit_broken`, gates `pending|
 Release also discovers detached helpers whose current directory is inside the worker's
 registered worktree, including nested directories. It sends SIGTERM, waits up to two
 seconds, then sends SIGKILL to remaining eligible processes and checks again. Each
-process is reported with its PID, command, cwd and outcome. The daemon rechecks cwd and
-start identity before every signal. Processes outside the worktree, the daemon and its
+process is reported with its PID, command, cwd, matched worktree and outcome. The daemon
+rechecks ownership, canonical cwd, scope and start identity before every signal. Processes outside the worktree, the daemon and its
 ancestors, and executables named `herdr*` or `horch*` are excluded. A shared live worktree
 refuses ordinary release until the other worker is gone. Explicit hand-off closes only
 the source pane; shared helpers remain with the recipient. Unreadable inventories or surviving
@@ -252,13 +252,31 @@ horch sweep --dry-run       # inspect first; no signals or worker-state changes
 horch sweep                 # stop eligible orphan helpers
 ```
 
-Sweep considers only worktrees recorded by this daemon that were released/stopped or
-no longer exist. It protects worktrees reused by live or starting workers. It does not
-search arbitrary directories or remove worktrees. Linux reads `/proc`; macOS uses `ps`
-and `lsof`. Cleanup needs permission to inspect and signal the current user's processes.
-Linux excludes nondumpable processes, different security credentials and greater capabilities;
-it does not attempt privileged cleanup.
-A protected or relocated process is explicitly reported as skipped. Helpers that keep
+Sweep defaults to no candidates. Cleanup requires a root recorded in this daemon’s
+worker store for a released worker **and fresh proof that the exact root is a linked
+Git worktree**. Its Git directory must differ from the common Git directory, and Git’s
+administration backlink must identify that worktree. Main checkouts, non-Git directories,
+subdirectories and missing roots are skipped with `not a disposable worktree`; dry-run
+reports these roots separately from candidate processes. Horch currently opens existing
+worktrees and has no trusted creation-marker provenance, so a historical worker record
+alone never authorizes cleanup after a root disappears.
+
+A stopped worker with an existing worktree does not qualify. Live or starting worker
+scopes remain protected. Sweep does not search arbitrary directories or remove worktrees.
+Home, parents of home, `/System`, `/Library`, `/usr`, `/Applications`, `~/Library` and
+parents of these system directories cannot authorize cleanup. Common container roots
+such as `/tmp`, `/private` and `/Volumes` are also denied. OS application/service
+executables remain protected even if they inherit a worktree cwd. Cwds in protected
+directories, symlink escapes, unknown ownership and other users are excluded.
+Release and hand-off enforce the same boundary, including with `--force`; an unsafe or
+non-disposable recorded root refuses release before pane closure. Disposal proof and
+process scope are checked again before every signal. Legacy workers with no recorded
+worktree can still close their explicitly requested pane, but never run cwd cleanup or
+direct process signals. Linux reads `/proc`; macOS uses
+`ps` and `lsof`. Cleanup needs permission to inspect and signal the current user's
+processes. Linux excludes nondumpable processes, different security credentials and
+greater capabilities; it does not attempt privileged cleanup.
+Previously selected processes that leave scope are reported as skipped. Helpers that keep
 forking beyond the bounded release passes leave release incomplete for a later retry.
 
 Named leases coordinate resources across herdr sessions sharing the same state root:

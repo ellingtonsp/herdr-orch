@@ -76,8 +76,8 @@ The daemon and its ancestors are protected. Cleanup refuses overlapping live/sta
 worktrees; startup reserves its scope before launch and closing workers cannot be
 registered or dispatched again. New helpers discovered after signaling are handled in
 bounded passes. Unresolved inspection errors or survivors retain resource ownership.
-An explicit `sweep` (optionally `--dry-run`) uses recorded released/stopped or missing
-worktrees, excludes reused live scopes, and reports per-process outcomes.
+An explicit `sweep` (optionally `--dry-run`) uses recorded released linked
+worktrees, excludes reused live scopes, and reports per-process outcomes and skipped roots.
 
 Leases live in a shared `leases.db` at the plugin state root, alongside `sessions/`.
 Each session attaches this registry to its SQLite connection. A resource is a unique
@@ -215,3 +215,25 @@ late reports. Receipt state is durable; per-connection mailbox leases and per-pa
 serialization are daemon-local. Restart resumes only jobs with no submission attempt and
 escalates uncertain writes. Completion report association and message insertion are atomic;
 late notes preserve settlement. Dispatches snapshot launch metadata for historical accuracy.
+
+### Cleanup scope authorization
+
+Sweep authorizes a process only through an explicit released worker-store root with
+fresh proof of an exact linked Git worktree. Git’s canonical top-level must equal the
+recorded root, its Git directory must differ from its common directory, and its linked
+administration backlink must point at that root. Read-only Git queries have a bounded
+timeout and ignore inherited Git environment overrides and global/system configuration.
+Main checkouts, non-Git roots, subdirectories and missing roots are report-only with
+`not a disposable worktree`. Existing stopped roots are not eligible. No trusted
+horch-created marker exists today: opening or recording an existing directory does not
+create such provenance, and removed roots cannot be authorized from history alone.
+
+The shared cleanup scope used by release, hand-off, sweep and bounded rescans rejects
+home/system roots and their ancestors, rejects filesystem container roots and OS service
+executables, checks known current-user ownership, resolves cwd symlinks, and verifies
+disposal proof and containment again immediately before every signal. Release rechecks
+proof before pane closure, even with `--force`. Legacy empty-worktree registrations
+retain explicit pane closure and exit verification only: no cwd inventory cleanup or
+direct signals. No eligible root means no candidates or
+host inventory. Reports include matched roots and separate `skipped_worktrees` entries;
+literal existing ` (deleted)` directory names retain their boundaries.

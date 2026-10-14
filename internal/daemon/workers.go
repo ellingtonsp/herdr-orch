@@ -933,6 +933,11 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 	if rootErr != nil {
 		return res, refusal("process_scan_failed", "%v", rootErr)
 	}
+	if root != "" {
+		if _, err := newCleanupScope(root); err != nil {
+			return res, refusal("unsafe_worktree", "%v", err)
+		}
+	}
 	e.mu.Lock()
 	current, currentErr := e.st.GetWorker(w.PaneID)
 	if currentErr != nil {
@@ -952,6 +957,10 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 		if rootErr != nil {
 			e.mu.Unlock()
 			return res, rootErr
+		}
+		if _, err := newCleanupScope(root); err != nil {
+			e.mu.Unlock()
+			return res, refusal("unsafe_worktree", "%v", err)
 		}
 	}
 	if root != "" && opt.HandOff == "" {
@@ -1052,6 +1061,13 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 			if _, overlap := paneProcesses[pid]; overlap {
 				return res, refusal("protected_process", "source and recipient share process %d", pid)
 			}
+		}
+	}
+	// Inspection and archiving may take time; disposal proof must still hold
+	// immediately before closing the pane as well as before explicit signals.
+	if root != "" {
+		if _, err := newCleanupScope(root); err != nil {
+			return res, refusal("unsafe_worktree", "%v", err)
 		}
 	}
 	closeErr := e.h.PaneClose(ctx, w.PaneID)

@@ -2,10 +2,19 @@
 
 ## Unreleased
 
+- **Cleanup scope safety.** Sweep defaults to no candidates outside recorded released
+  linked Git worktrees. Exact Git root and administration-backlink proof is required
+  before each signal. Main checkouts, ordinary directories and missing roots are skipped
+  with `not a disposable worktree`, reported separately as `skipped_worktrees`.
+  Shared cleanup rejects home/system scopes, symlink escapes and unknown/other-user
+  ownership. Existing stopped roots no longer qualify; unsafe or non-disposable release
+  roots refuse before pane closure even with `--force`. Reports identify matched
+  worktrees and literal deleted-suffix directory names retain their boundaries.
+
 - **Process hygiene.** Worker release discovers detached helpers by worktree cwd on
   macOS/Linux, rechecks identity and scope before TERM/KILL, protects orchestration
   processes and reports outcomes. `horch sweep [--dry-run]` handles recorded released
-  or removed worktrees while excluding reused live scopes.
+  linked worktrees while excluding reused live scopes; unproven or removed roots are report-only.
 - **Resource leases.** `horch lease acquire|release|list`, optional `--ttl`, and repeatable
   dispatch `--lease` reserve named simulator, port and database resources across sessions.
   Successful worker release frees leases; hand-off transfers them with unchanged expiry,

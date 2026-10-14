@@ -17,16 +17,19 @@ import (
 
 // ProcessRecord is a process identity, not just a reusable PID.
 type ProcessRecord struct {
-	PID     int    `json:"pid"`
-	Parent  int    `json:"-"`
-	Started string `json:"-"`
-	Command string `json:"command"`
-	Cwd     string `json:"cwd"`
+	UID      int    `json:"uid"`
+	UIDKnown bool   `json:"-"`
+	PID      int    `json:"pid"`
+	Parent   int    `json:"-"`
+	Started  string `json:"-"`
+	Command  string `json:"command"`
+	Cwd      string `json:"cwd"`
 }
 type ProcessOutcome struct {
 	ProcessRecord
-	Action string `json:"action"`
-	Error  string `json:"error,omitempty"`
+	Worktree string `json:"worktree,omitempty"`
+	Action   string `json:"action"`
+	Error    string `json:"error,omitempty"`
 }
 type processHost interface {
 	List(context.Context) ([]ProcessRecord, error)
@@ -83,7 +86,7 @@ func insideWorktree(root, cwd string) bool {
 }
 func protectedProcess(p ProcessRecord, ancestors map[int]bool) bool {
 	name := strings.ToLower(filepath.Base(p.Command))
-	return p.PID <= 1 || ancestors[p.PID] || strings.HasPrefix(name, "herdr") || strings.HasPrefix(name, "horch")
+	return p.PID <= 1 || ancestors[p.PID] || protectedExecutable(p.Command) || strings.HasPrefix(name, "herdr") || strings.HasPrefix(name, "horch")
 }
 func processAncestors(ps []ProcessRecord) map[int]bool {
 	byPID := map[int]int{}
@@ -112,7 +115,14 @@ func (e *Engine) processWait() time.Duration {
 // cleanProcesses rechecks cwd, executable and start identity before each signal.
 // A process that moves out of scope or becomes protected is never signalled.
 func (e *Engine) cleanProcesses(ctx context.Context, root string, ps []ProcessRecord, dry bool, guards ...func(ProcessRecord) bool) []ProcessOutcome {
+	scope, scopeErr := newCleanupScope(root)
+	if scopeErr != nil {
+		return []ProcessOutcome{}
+	}
 	allowed := func(p ProcessRecord) bool {
+		if !scope.contains(p) {
+			return false
+		}
 		for _, guard := range guards {
 			if !guard(p) {
 				return false
@@ -127,7 +137,7 @@ func (e *Engine) cleanProcesses(ctx context.Context, root string, ps []ProcessRe
 		if !insideWorktree(root, p.Cwd) || !allowed(p) {
 			continue
 		}
-		r := ProcessOutcome{ProcessRecord: p, Action: "would_stop"}
+		r := ProcessOutcome{ProcessRecord: p, Worktree: scope.root, Action: "would_stop"}
 		if protectedProcess(p, ancestors) {
 			r.Action = "protected"
 		}
@@ -215,9 +225,15 @@ func (e *Engine) cleanProcesses(ctx context.Context, root string, ps []ProcessRe
 type SweepArgs struct {
 	DryRun bool `json:"dry_run,omitempty"`
 }
+type SkippedWorktree struct {
+	Worktree string `json:"worktree"`
+	Reason   string `json:"reason"`
+}
+
 type SweepResult struct {
-	DryRun    bool             `json:"dry_run"`
-	Processes []ProcessOutcome `json:"processes"`
+	SkippedWorktrees []SkippedWorktree `json:"skipped_worktrees,omitempty"`
+	DryRun           bool              `json:"dry_run"`
+	Processes        []ProcessOutcome  `json:"processes"`
 }
 
 func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessage) (any, error) {
@@ -235,6 +251,8 @@ func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessa
 	if err != nil {
 		return nil, err
 	}
+	res := SweepResult{DryRun: a.DryRun, Processes: []ProcessOutcome{}}
+	skipped := map[string]bool{}
 	roots := map[string]bool{}
 	active := []string{}
 	for root, n := range e.starting {
@@ -245,7 +263,10 @@ func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessa
 	for _, w := range ws {
 		root, err := processRoot(w.Worktree)
 		if err != nil {
-			return nil, refusal("process_scan_failed", "%v", err)
+			if w.State == store.WorkerLive || w.State == store.WorkerReleaseFailed {
+				return nil, refusal("process_scan_failed", "cannot establish live worker boundary: %v", err)
+			}
+			continue
 		}
 		if root == "" {
 			continue
@@ -255,30 +276,55 @@ func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessa
 		if statErr != nil && !removed {
 			return nil, refusal("process_scan_failed", "%v", statErr)
 		}
-		if w.State == store.WorkerReleased || w.State == store.WorkerStopped || removed {
-			roots[root] = true
-		} else if w.State == store.WorkerLive || w.State == store.WorkerReleaseFailed {
+		// An unsafe root cannot authorize cleanup, but it must still protect live
+		// workers from narrower released roots that overlap their responsibility.
+		if !removed && (w.State == store.WorkerLive || w.State == store.WorkerReleaseFailed) {
 			active = append(active, root)
 		}
+		if w.State != store.WorkerReleased && !removed {
+			continue
+		}
+		scope, err := newCleanupScope(root)
+		if err != nil {
+			if !skipped[root] {
+				res.SkippedWorktrees = append(res.SkippedWorktrees, SkippedWorktree{Worktree: root, Reason: err.Error()})
+				skipped[root] = true
+			}
+			continue
+		}
+		roots[scope.root] = roots[scope.root] || w.State == store.WorkerReleased
+	}
+	sort.Slice(res.SkippedWorktrees, func(i, j int) bool { return res.SkippedWorktrees[i].Worktree < res.SkippedWorktrees[j].Worktree })
+	if len(roots) == 0 {
+		return res, nil
 	}
 	ps, err := e.processHost().List(ctx)
 	if err != nil {
 		return nil, refusal("process_scan_failed", "%v", err)
 	}
-	res := SweepResult{DryRun: a.DryRun, Processes: []ProcessOutcome{}}
 	ordered := []string{}
 	for r := range roots {
 		ordered = append(ordered, r)
 	}
 	sort.Strings(ordered)
 	owner := func(p ProcessRecord) string {
+		cwd, err := processRoot(p.Cwd)
+		if err != nil {
+			return ""
+		}
 		for _, r := range active {
-			if insideWorktree(r, p.Cwd) {
+			if insideWorktree(r, cwd) {
 				return ""
 			}
 		}
 		for _, r := range ordered {
-			if insideWorktree(r, p.Cwd) {
+			if !roots[r] {
+				// Missing-path authorization expires if the path is recreated.
+				if _, err := os.Stat(r); !os.IsNotExist(err) {
+					continue
+				}
+			}
+			if insideWorktree(r, cwd) {
 				return r
 			}
 		}
@@ -335,6 +381,11 @@ func (e *Engine) reserveStarting(root string) (func(), error) {
 // cleanProcessScope follows late children and processes that return into scope.
 // It keeps each process's latest outcome and bounds continuously respawning work.
 func (e *Engine) cleanProcessScope(ctx context.Context, root string, ps []ProcessRecord, dry bool, guards ...func(ProcessRecord) bool) ([]ProcessOutcome, error) {
+	scope, err := newCleanupScope(root)
+	if err != nil {
+		return nil, err
+	}
+	guards = append(guards, scope.contains)
 	out := e.cleanProcesses(ctx, root, ps, dry, guards...)
 	if dry {
 		return out, nil
@@ -393,7 +444,7 @@ func (e *Engine) cleanProcessScope(ctx context.Context, root string, ps []Proces
 		if round == 2 {
 			for _, p := range scan {
 				if todo[key(p)] {
-					out = replaceOutcome(out, ProcessOutcome{ProcessRecord: p, Action: "unverified", Error: "process remains after bounded cleanup; retry"})
+					out = replaceOutcome(out, ProcessOutcome{ProcessRecord: p, Worktree: scope.root, Action: "unverified", Error: "process remains after bounded cleanup; retry"})
 				}
 			}
 			return out, nil

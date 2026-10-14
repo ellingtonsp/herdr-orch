@@ -163,8 +163,20 @@ Release discovers detached processes by cwd inside the registered worktree, rech
 identity/scope before TERM then KILL, and reports outcomes. It excludes outside processes,
 `herdr*`/`horch*`, the daemon and its ancestors. Shared live/starting worktrees refuse
 ordinary cleanup. Explicit hand-off closes only the source pane and preserves shared helpers. Inventory errors and survivors keep release incomplete and retain leases.
-Sweep only considers recorded released/stopped or missing worktrees; live reused scopes
-are protected. Dry-run sends no signals. Neither command removes worktrees.
+Sweep defaults to no candidates and requires both a released worker-store root and fresh
+proof of an exact linked Git worktree (distinct Git/common directories and a matching
+administration backlink). Main checkouts, ordinary directories, subdirectories and missing
+roots report `not a disposable worktree` and produce zero candidates. Horch has no trusted
+worktree-creation marker today; recording or opening a root never creates that provenance.
+Live reused scopes are protected; existing stopped roots do not qualify. Both cleanup paths
+reject home and its parents, `/System`, `/Library`, `/usr`, `/Applications`, `~/Library`,
+their parents, symlink escapes and unknown/other-user ownership. Common container roots
+and OS service executables are also excluded. Disposal proof, scope and owner checks run
+before every signal. Unsafe or non-disposable release roots refuse before pane closure,
+including with `--force`. Legacy workers without a recorded worktree retain explicit
+pane closure only, without cwd cleanup or direct signals. Reports include matched
+worktrees and skipped-root reasons.
+Dry-run sends no signals. Neither command removes worktrees.
 
 ## Gates and schedules
 

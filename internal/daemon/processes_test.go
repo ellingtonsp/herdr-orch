@@ -55,9 +55,9 @@ func (f *fakeProcesses) Signal(pid int, sig syscall.Signal) error {
 	return nil
 }
 func TestProcessSafetyBoundaries(t *testing.T) {
-	root := t.TempDir()
+	root := gitWorktree(t)
 	root, _ = processRoot(root)
-	ps := []ProcessRecord{{PID: 100001, Started: "1", Cwd: root, Command: "helper"}, {PID: 100002, Started: "2", Cwd: root + "-other", Command: "helper"}, {PID: 100003, Started: "3", Cwd: root, Command: "/bin/horch"}, {PID: 100004, Started: "4", Cwd: root, Command: "/bin/herdr"}, {PID: os.Getpid(), Started: "5", Cwd: root, Command: "test"}}
+	ps := []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100002, Started: "2", Cwd: root + "-other", Command: "helper"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100003, Started: "3", Cwd: root, Command: "/bin/horch"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100004, Started: "4", Cwd: root, Command: "/bin/herdr"}, {UID: os.Geteuid(), UIDKnown: true, PID: os.Getpid(), Started: "5", Cwd: root, Command: "test"}}
 	f := &fakeProcesses{ps: ps}
 	e := &Engine{processes: f, processGrace: time.Millisecond}
 	dry := e.cleanProcesses(context.Background(), root, ps, true)
@@ -72,8 +72,8 @@ func TestProcessSafetyBoundaries(t *testing.T) {
 func TestCleanupRevalidatesEverySignal(t *testing.T) {
 	for _, mode := range []string{"reused", "moved", "protected", "unreadable"} {
 		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
-			p := ProcessRecord{PID: 100001, Started: "1", Cwd: root, Command: "helper"}
+			root := gitWorktree(t)
+			p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}
 			f := &fakeProcesses{ps: []ProcessRecord{p}}
 			f.inspect = func(int) (ProcessRecord, error) {
 				q := p
@@ -133,16 +133,9 @@ func TestProcessRoot(t *testing.T) {
 func TestSweepReleasedRemovedAndReused(t *testing.T) {
 	x := newHarness(t)
 	r := setupRun(x)
-	base := t.TempDir()
-	base, _ = processRoot(base)
-	released := filepath.Join(base, "released")
-	reused := filepath.Join(base, "reused")
-	removed := filepath.Join(base, "removed")
-	for _, dir := range []string{released, reused} {
-		if err := os.Mkdir(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	released := gitWorktree(t)
+	reused := gitWorktree(t)
+	removed := filepath.Join(t.TempDir(), "removed")
 	for i, w := range []store.Worker{{PaneID: "w1:p2", Worktree: released}, {PaneID: "w1:p3", Worktree: reused}, {PaneID: "w1:p4", Worktree: reused}, {PaneID: "w1:p5", Worktree: removed}} {
 		w.RunID = r.ID
 		x.st.RegisterWorker(w)
@@ -150,28 +143,28 @@ func TestSweepReleasedRemovedAndReused(t *testing.T) {
 			x.st.SetWorkerState(w.PaneID, store.WorkerReleased, "", "")
 		}
 	}
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: released, Command: "helper"}, {PID: 100002, Started: "2", Cwd: reused, Command: "helper"}, {PID: 100003, Started: "3", Cwd: removed, Command: "helper"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: released, Command: "helper"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100002, Started: "2", Cwd: reused, Command: "helper"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100003, Started: "3", Cwd: removed, Command: "helper"}}}
 	x.e.processes = f
 	x.e.processGrace = time.Millisecond
 	var got SweepResult
 	x.mustOp(coord, "sweep", SweepArgs{DryRun: true}, &got)
-	if len(got.Processes) != 2 || len(f.signals) != 0 {
+	if len(got.Processes) != 1 || len(f.signals) != 0 {
 		t.Fatalf("sweep %+v", got)
 	}
 	x.mustOp(coord, "sweep", SweepArgs{}, &got)
-	if len(got.Processes) != 2 || len(f.signals) != 4 {
+	if len(got.Processes) != 1 || len(f.signals) != 2 {
 		t.Fatalf("sweep %+v %+v", got, f.signals)
 	}
 }
 func TestReleaseDiscoversDetachedProcesses(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	dir := t.TempDir()
+	dir := gitWorktree(t)
 	dir, _ = processRoot(dir)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = dir
 	x.st.RegisterWorker(w)
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: dir, Command: "helper"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: dir, Command: "helper"}}}
 	x.e.processes = f
 	x.e.processGrace = time.Millisecond
 	var got CloseResult
@@ -220,7 +213,7 @@ func TestReleaseScanFailureKeepsWorkerAndLease(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
 	w, _ := x.st.GetWorker("w1:p2")
-	w.Worktree = t.TempDir()
+	w.Worktree = gitWorktree(t)
 	x.st.RegisterWorker(w)
 	if _, err := x.st.AcquireLease("port:3000", w.PaneID, time.Hour); err != nil {
 		t.Fatal(err)
@@ -238,11 +231,11 @@ func TestReleaseSurvivorRetainsLease(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
 	w, _ := x.st.GetWorker("w1:p2")
-	w.Worktree = t.TempDir()
+	w.Worktree = gitWorktree(t)
 	w.Worktree, _ = processRoot(w.Worktree)
 	x.st.RegisterWorker(w)
 	x.st.AcquireLease("db:acme", w.PaneID, time.Hour)
-	x.e.processes = &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: w.Worktree, Command: "helper"}}, stubborn: true}
+	x.e.processes = &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: w.Worktree, Command: "helper"}}, stubborn: true}
 	x.e.processGrace = time.Millisecond
 	_, err := x.op(coord, "worker.release", WorkerRef{Worker: w.PaneID})
 	wantRefusal(t, err, "release_failed")
@@ -255,7 +248,7 @@ func TestReleaseSurvivorRetainsLease(t *testing.T) {
 func TestCleanupExcludesStartingAndSharedWorktrees(t *testing.T) {
 	x := newHarness(t)
 	r := setupRun(x, "w1:p2")
-	root := t.TempDir()
+	root := gitWorktree(t)
 	root, _ = processRoot(root)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = root
@@ -277,7 +270,7 @@ func TestCleanupExcludesStartingAndSharedWorktrees(t *testing.T) {
 func TestClosingBlocksRegistrationAndStartupReservation(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	root := t.TempDir()
+	root := gitWorktree(t)
 	root, _ = processRoot(root)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = root
@@ -291,7 +284,7 @@ func TestClosingBlocksRegistrationAndStartupReservation(t *testing.T) {
 func TestSweepStartingScopeIsExcluded(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	root := t.TempDir()
+	root := gitWorktree(t)
 	root, _ = processRoot(root)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = root
@@ -302,7 +295,7 @@ func TestSweepStartingScopeIsExcluded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Cwd: root, Command: "helper", Started: "1"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Cwd: root, Command: "helper", Started: "1"}}}
 	x.e.processes = f
 	var got SweepResult
 	x.mustOp(coord, "sweep", SweepArgs{}, &got)
@@ -311,14 +304,10 @@ func TestSweepStartingScopeIsExcluded(t *testing.T) {
 	}
 }
 func TestNativeCleanupOutsideSiblingSurvives(t *testing.T) {
-	root := t.TempDir()
-	root, _ = processRoot(root)
-	dir := filepath.Join(root, "acme")
-	outside := filepath.Join(root, "acme-other")
-	for _, p := range []string{dir, outside} {
-		if err := os.Mkdir(p, 0700); err != nil {
-			t.Fatal(err)
-		}
+	dir := gitWorktree(t)
+	outside := dir + "-other"
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
 	}
 	spawn := func(dir string) *exec.Cmd {
 		cmd := exec.Command("sleep", "60")
@@ -376,7 +365,7 @@ func TestProtectedPaneIsNeverClosed(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
 	x.h.pids["w1:p2"] = []int{100001}
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Command: "/bin/herdr", Started: "1", Cwd: "/tmp"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Command: "/bin/herdr", Started: "1", Cwd: "/tmp"}}}
 	x.e.processes = f
 	_, err := x.op(coord, "worker.release", WorkerRef{Worker: "w1:p2"})
 	wantRefusal(t, err, "protected_process")
@@ -396,12 +385,12 @@ func TestReleaseRetainsOutsidePaneProcess(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
 	w, _ := x.st.GetWorker("w1:p2")
-	w.Worktree = t.TempDir()
+	w.Worktree = gitWorktree(t)
 	w.Worktree, _ = processRoot(w.Worktree)
 	x.st.RegisterWorker(w)
 	x.h.pids[w.PaneID] = []int{100001}
 	x.h.killOnClose = false
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Command: "helper", Started: "1", Cwd: w.Worktree + "-outside"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Command: "helper", Started: "1", Cwd: w.Worktree + "-outside"}}}
 	x.e.processes = f
 	_, err := x.op(coord, "worker.release", WorkerRef{Worker: w.PaneID})
 	wantRefusal(t, err, "release_failed")
@@ -411,12 +400,12 @@ func TestReleaseRetainsOutsidePaneProcess(t *testing.T) {
 }
 
 func TestScopeCleanupFollowsLateChild(t *testing.T) {
-	root := t.TempDir()
+	root := gitWorktree(t)
 	root, _ = processRoot(root)
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: root, Command: "helper"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}}}
 	f.onSignal = func(pid int, sig syscall.Signal) {
 		if pid == 100001 && sig == syscall.SIGKILL {
-			f.ps = append(f.ps, ProcessRecord{PID: 100002, Started: "2", Cwd: root, Command: "child"})
+			f.ps = append(f.ps, ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100002, Started: "2", Cwd: root, Command: "child"})
 		}
 	}
 	e := &Engine{processes: f, processGrace: time.Millisecond}
@@ -426,8 +415,8 @@ func TestScopeCleanupFollowsLateChild(t *testing.T) {
 	}
 }
 func TestScopeCleanupRetriesProcessReturningInside(t *testing.T) {
-	root := t.TempDir()
-	p := ProcessRecord{PID: 100001, Started: "1", Cwd: root, Command: "helper"}
+	root := gitWorktree(t)
+	p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}
 	f := &fakeProcesses{ps: []ProcessRecord{p}}
 	first := true
 	f.inspect = func(pid int) (ProcessRecord, error) {
@@ -451,9 +440,9 @@ func TestScopeCleanupRetriesProcessReturningInside(t *testing.T) {
 	}
 }
 func TestScopeGuardRecheckedBeforeSignal(t *testing.T) {
-	root := t.TempDir()
+	root := gitWorktree(t)
 	live := filepath.Join(root, "live")
-	p := ProcessRecord{PID: 100001, Started: "1", Cwd: root, Command: "helper"}
+	p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}
 	f := &fakeProcesses{ps: []ProcessRecord{p}}
 	f.inspect = func(int) (ProcessRecord, error) { q := p; q.Cwd = live; return q, nil }
 	e := &Engine{processes: f, processGrace: time.Millisecond}
@@ -528,7 +517,7 @@ func TestHandOffKeepsRecipientHelpersAndTransfersLease(t *testing.T) {
 	x.h.pids["w1:helper"] = []int{100001}
 	x.h.pids["w1:owner"] = []int{100002}
 	x.h.killOnClose = false
-	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: root, Command: "helper"}, {PID: 100002, Started: "2", Cwd: root, Command: "owner"}, {PID: 100003, Started: "3", Cwd: root, Command: "database"}}}
+	f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100002, Started: "2", Cwd: root, Command: "owner"}, {UID: os.Geteuid(), UIDKnown: true, PID: 100003, Started: "3", Cwd: root, Command: "database"}}}
 	x.e.processes = f
 	x.e.processGrace = time.Millisecond
 	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:helper", HandOffTo: "w1:owner"}, nil)
@@ -568,14 +557,14 @@ func TestRestartRetainsResourceLease(t *testing.T) {
 func TestReleaseDoesNotMistakeNewInspectionBoundaryForExit(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	root, _ := processRoot(t.TempDir())
+	root := gitWorktree(t)
 	w, _ := x.st.GetWorker("w1:p2")
 	w.Worktree = root
 	x.st.RegisterWorker(w)
 	if _, err := x.st.AcquireLease("db:acme", w.PaneID, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	p := ProcessRecord{PID: 100001, Started: "1", Cwd: root, Command: "helper"}
+	p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Cwd: root, Command: "helper"}
 	f := &fakeProcesses{ps: []ProcessRecord{p}}
 	f.onSignal = func(int, syscall.Signal) { f.ps = nil }
 	f.inspect = func(int) (ProcessRecord, error) {
