@@ -56,7 +56,7 @@ agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► d
 
 | Table | Holds |
 |---|---|
-| `runs` | title, coordinator pane, status, auto-dispatch, max attempts, idle-report and idle-flag delays |
+| `runs` | title, coordinator pane, status, auto-dispatch, max attempts, idle-report and idle-flag delays, load and memory admission limits |
 | `messages` | from, to, kind (`note, question, reply, done, escalation`), task, reply-to, read state, delivery/pickup receipts |
 | `dispatch_reports` | immutable report-to-dispatch associations, including late notes |
 | `tasks` | spec, deps, status, assignee, attempts, result |
@@ -67,6 +67,34 @@ agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► d
 
 Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
 
+## Cleanup, leases and admission
+
+Worker release inventories same-user process cwd paths before and after pane closure.
+Only canonical descendants of the registered worktree are signal candidates. PID start
+identity, cwd and protected executable names are checked again before TERM and KILL.
+The daemon and its ancestors are protected. Cleanup refuses overlapping live/starting
+worktrees; startup reserves its scope before launch and closing workers cannot be
+registered or dispatched again. New helpers discovered after signaling are handled in
+bounded passes. Unresolved inspection errors or survivors retain resource ownership.
+An explicit `sweep` (optionally `--dry-run`) uses recorded released/stopped or missing
+worktrees, excludes reused live scopes, and reports per-process outcomes.
+
+Leases live in a shared `leases.db` at the plugin state root, alongside `sessions/`.
+Each session attaches this registry to its SQLite connection. A resource is a unique
+key; the holder includes session database identity and worker pane, so identical pane
+or dispatch IDs from different sessions cannot steal or free each other's resources.
+A dispatch claims its task and all requested leases in one serialized transaction before
+prompt submission. An explicit pre-delivery rejection releases only newly acquired
+leases; uncertain delivery retains them until release or expiry. Successful worker
+release updates its state and removes its leases together; hand-off instead transfers them
+to the reserved recipient with unchanged expiry. Restart keeps its resource reservations. The session database uses WAL:
+a crash during a multi-database commit can leave a conservative unsent claim or lease;
+TTL bounds that stale reservation. No prompt is sent until commit returns successfully.
+
+Run admission samples host load and available memory immediately before claiming a
+new dispatch. Zero limits preserve existing behavior. Refusals leave ready tasks for
+manual or later automatic retry. Enabled checks fail closed if OS metrics are unavailable.
+These limits do not measure per-worker consumption or enforce a running-worker quota.
 ## Dispatch and worker lifecycle
 
 Dispatch holds store a deadline or named event, reason and actor. Named event holds require
@@ -86,7 +114,10 @@ unsaved-work validation after a crash.
 
 Release hand-off reserves both workers, verifies their live pane directories resolve to the
 same git worktree, and persists a responsibility receipt before teardown. It bypasses only the
-unsaved-work check; active-dispatch and process cleanup rules are retained.
+unsaved-work check; active-dispatch and source-pane process cleanup rules are retained.
+Worktree-wide termination is disabled for hand-off so the recipient and shared helpers
+remain running. After source cleanup succeeds, leases move to the recipient and its recorded
+worktree is reconciled to the verified shared root, protecting helpers from later sweeps.
 
 ## Day plans
 

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
@@ -366,6 +367,99 @@ func TestWorkerHandOffRejectsInvalidRecipients(t *testing.T) {
 			if w.HandOffTo != "" || w.Lifecycle != "" {
 				t.Fatalf("refusal changed responsibility: %+v", w)
 			}
+		})
+	}
+}
+
+func TestWorkerRestartRejectsReplacementWhileWaitingForProcessLock(t *testing.T) {
+	cases := []struct {
+		name, phase string
+		change      func(*store.Worker)
+	}{
+		{name: "registration", phase: "receiving_hand_off", change: func(w *store.Worker) {
+			w.Name = "replacement-worker"
+			w.Worktree = t.TempDir()
+			w.AgentArgs = []string{"--model", "replacement-model"}
+		}},
+		{name: "account", phase: "restart", change: func(w *store.Worker) { w.Account = "replacement-account" }},
+		{name: "profile", phase: "restart", change: func(w *store.Worker) { w.Profile = "replacement-profile" }},
+		{name: "model", phase: "restart", change: func(w *store.Worker) { w.Model = "replacement-model" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			x, f, w, task, old := restartHarness(t)
+			// Launch args are intentionally absent from RPC JSON. Read the stored
+			// registration so metadata-only replacements keep identical private args.
+			stored, readErr := x.st.GetWorker(w.PaneID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			w = stored
+			x.e.processMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					x.e.processMu.Unlock()
+				}
+			}()
+			finished := make(chan error, 1)
+			go func() {
+				_, err := x.e.opWorkerRestart(context.Background(), coord, mustJSON(WorkerRestartArgs{Worker: w.PaneID}))
+				finished <- err
+			}()
+			deadline := time.Now().Add(time.Second)
+			for {
+				current, err := x.st.GetWorker(w.PaneID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.Lifecycle == "restart" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("restart did not reserve lifecycle before process lock")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			// A competing process owner replaced the registration while it held processMu.
+			// Preserve that replacement's lifecycle when the older restart finally gets the lock.
+			replacement := w
+			tc.change(&replacement)
+			x.e.mu.Lock()
+			err := x.st.SetWorkerLifecycle(w.PaneID, "")
+			if err == nil {
+				_, err = x.st.RegisterWorker(replacement)
+			}
+			if err == nil {
+				err = x.st.BeginWorkerLifecycle(w.PaneID, tc.phase)
+			}
+			x.e.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			x.e.processMu.Unlock()
+			locked = false
+			select {
+			case err := <-finished:
+				wantRefusal(t, err, "worker_changed")
+			case <-time.After(2 * time.Second):
+				t.Fatal("stale restart did not return")
+			}
+			current, err := x.st.GetWorker(w.PaneID)
+			if err != nil || current.Name != replacement.Name || current.Lifecycle != tc.phase || !reflect.DeepEqual(current.AgentArgs, replacement.AgentArgs) || current.Account != replacement.Account || current.Profile != replacement.Profile || current.Model != replacement.Model {
+				t.Fatalf("replacement registration damaged: %+v %v", current, err)
+			}
+			active, err := x.st.ActiveDispatchForPane(w.PaneID)
+			if err != nil || active.ID != old.ID || x.task(task.ID).Attempts != 1 {
+				t.Fatalf("stale restart changed dispatch: %+v %v", active, err)
+			}
+			if f.scriptPath != "" || len(f.args) != 0 || len(f.typed[w.PaneID]) != 0 {
+				t.Fatalf("stale restart mutated pane: script=%q args=%v typed=%v", f.scriptPath, f.args, f.typed[w.PaneID])
+			}
+			if len(x.inbox(coord)) != 0 {
+				t.Fatal("stale restart escalated as replacement failure")
+			}
+
 		})
 	}
 }

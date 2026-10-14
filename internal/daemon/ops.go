@@ -19,6 +19,10 @@ type Handler func(ctx context.Context, caller string, args json.RawMessage) (any
 // Ops returns the op table served on orch.sock.
 func (e *Engine) Ops() map[string]Handler {
 	return map[string]Handler{
+		"lease.acquire":   e.opLeaseAcquire,
+		"lease.release":   e.opLeaseRelease,
+		"lease.list":      e.opLeaseList,
+		"sweep":           e.opProcessSweep,
 		"run.create":      e.opRunCreate,
 		"run.use":         e.opRunUse,
 		"run.current":     e.opRunCurrent,
@@ -224,14 +228,16 @@ func (e *Engine) runShow(r store.Run) (RunShow, error) {
 }
 
 type RunUpdateArgs struct {
-	Run          string  `json:"run,omitempty"`
-	Status       *string `json:"status,omitempty"`
-	Coordinator  *string `json:"coordinator,omitempty"`
-	AutoDispatch *bool   `json:"auto_dispatch,omitempty"`
-	MaxAttempts  *int    `json:"max_attempts,omitempty"`
-	Title        *string `json:"title,omitempty"`
-	IdleReportMS *int64  `json:"idle_report_ms,omitempty"`
-	IdleFlagMS   *int64  `json:"idle_flag_ms,omitempty"`
+	Run          string   `json:"run,omitempty"`
+	Status       *string  `json:"status,omitempty"`
+	Coordinator  *string  `json:"coordinator,omitempty"`
+	AutoDispatch *bool    `json:"auto_dispatch,omitempty"`
+	MaxAttempts  *int     `json:"max_attempts,omitempty"`
+	Title        *string  `json:"title,omitempty"`
+	IdleReportMS *int64   `json:"idle_report_ms,omitempty"`
+	IdleFlagMS   *int64   `json:"idle_flag_ms,omitempty"`
+	MaxLoad      *float64 `json:"max_load,omitempty"`
+	MinFreeMem   *float64 `json:"min_free_mem,omitempty"`
 }
 
 func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -248,7 +254,7 @@ func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessa
 	if a.Coordinator != nil && *a.Coordinator == "me" {
 		*a.Coordinator = caller
 	}
-	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, AutoDispatch: a.AutoDispatch, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS, IdleFlagMS: a.IdleFlagMS})
+	r, err = e.st.UpdateRun(r.ID, store.RunUpdate{Status: a.Status, Coordinator: a.Coordinator, AutoDispatch: a.AutoDispatch, MaxAttempts: a.MaxAttempts, Title: a.Title, IdleReportMS: a.IdleReportMS, IdleFlagMS: a.IdleFlagMS, MaxLoad: a.MaxLoad, MinFreeMem: a.MinFreeMem})
 	if err != nil {
 		return nil, err
 	}
@@ -697,11 +703,12 @@ func (e *Engine) opTaskUpdate(_ context.Context, _ string, raw json.RawMessage) 
 // ---------- dispatch ----------
 
 type DispatchArgs struct {
-	Run   string `json:"run,omitempty"`
-	Task  string `json:"task,omitempty"`
-	To    string `json:"to"`
-	Title string `json:"title,omitempty"`
-	Spec  string `json:"spec,omitempty"`
+	Leases []string `json:"leases,omitempty"`
+	Run    string   `json:"run,omitempty"`
+	Task   string   `json:"task,omitempty"`
+	To     string   `json:"to"`
+	Title  string   `json:"title,omitempty"`
+	Spec   string   `json:"spec,omitempty"`
 	// For --to new:<agent>.
 	Cwd  string `json:"cwd,omitempty"`
 	Name string `json:"name,omitempty"`
@@ -711,6 +718,11 @@ func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMess
 	a, err := decode[DispatchArgs](raw)
 	if err != nil {
 		return nil, err
+	}
+	for _, resource := range a.Leases {
+		if _, err := store.NormalizeResource(resource); err != nil {
+			return nil, err
+		}
 	}
 	if a.To == "" {
 		return nil, refusal("bad_args", "--to is required")
@@ -747,6 +759,13 @@ func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMess
 	}
 	var pane string
 	if kind, ok := strings.CutPrefix(a.To, "new:"); ok {
+		run, err := e.st.GetRun(t.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.checkAdmission(ctx, run); err != nil {
+			return nil, err
+		}
 		w, err := e.startWorker(ctx, caller, WorkerStartArgs{Run: t.RunID, Agent: kind, Cwd: a.Cwd, Name: a.Name})
 		if err != nil {
 			return nil, err
@@ -762,12 +781,15 @@ func (e *Engine) opDispatch(ctx context.Context, caller string, raw json.RawMess
 		}
 		pane = to[0]
 	}
-	return e.dispatchTo(ctx, t.ID, pane)
+	return e.dispatchToWithLeases(ctx, t.ID, pane, a.Leases)
 }
 
 // dispatchTo claims the task, submits the prompt and marks the dispatch sent. A failed
 // submission fences the dispatch (the attempt is not counted) and refuses.
 func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dispatch, error) {
+	return e.dispatchToWithLeases(ctx, taskID, pane, nil)
+}
+func (e *Engine) dispatchToWithLeases(ctx context.Context, taskID, pane string, resources []string) (store.Dispatch, error) {
 	info, err := e.h.PaneGet(ctx, pane)
 	if err != nil {
 		return store.Dispatch{}, refusal("unknown_pane", "pane %s: %v", pane, err)
@@ -792,9 +814,21 @@ func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dis
 		e.mu.Unlock()
 		return store.Dispatch{}, err
 	}
+	if e.closing[pane] {
+		e.mu.Unlock()
+		return store.Dispatch{}, refusal("worker_closing", "worker %s is being released", pane)
+	}
+	run, err := e.st.GetRun(t.RunID)
+	if err == nil {
+		err = e.checkAdmission(ctx, run)
+	}
+	if err != nil {
+		e.mu.Unlock()
+		return store.Dispatch{}, err
+	}
 	prompt := buildPrompt(t, "", e.horchCmd(pane))
 	sum := sha256.Sum256([]byte(prompt))
-	d, err := e.st.BeginDispatch(taskID, pane, agent, hex.EncodeToString(sum[:8]))
+	d, err := e.st.BeginDispatchWithLeases(taskID, pane, agent, hex.EncodeToString(sum[:8]), resources, store.DefaultLeaseTTL)
 	if err == nil {
 		e.status[pane] = info.AgentStatus
 		_ = e.st.SetFlagged(pane, 0)
@@ -810,13 +844,22 @@ func (e *Engine) dispatchTo(ctx context.Context, taskID, pane string) (store.Dis
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if sendErr != nil {
-		st, ferr := e.st.Fence(d.ID, "prompt not delivered: "+sendErr.Error())
+		code := herdr.ErrCode(sendErr)
+		var st store.Settlement
+		var ferr error
+		switch code {
+		case "agent_not_ready", "agent_blocked", "agent_busy":
+			st, ferr = e.st.FenceUnsent(d.ID, "prompt rejected: "+sendErr.Error())
+		default:
+			// A timeout or transport error can follow delivery. Keep resource leases
+			// until the coordinator verifies release or their explicit TTL expires.
+			st, ferr = e.st.Fence(d.ID, "prompt delivery uncertain: "+sendErr.Error())
+		}
 		if ferr == nil {
 			e.recomputeWatch()
 			e.notify.broadcast()
 			_ = st
 		}
-		code := herdr.ErrCode(sendErr)
 		if code == "" {
 			code = "send_failed"
 		}

@@ -24,10 +24,24 @@ func awaitConsumer(t *testing.T, e *Engine, caller, holder string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		_, err := checkConsumer(context.Background(), e, caller, "contender", false, false, 0)
-		if r, ok := AsRefusal(err); ok && r.Code == "mailbox_busy" {
-			if !strings.Contains(r.Message, holder) {
-				t.Fatalf("holder missing from refusal: %v", err)
+		// A destructive readiness probe can beat the real waiter to the mailbox
+		// lease and make that waiter refuse. Observe ownership without competing.
+		e.mu.Lock()
+		label := ""
+		if lease := e.consumers[caller]; lease != nil {
+			label = lease.label
+		}
+		e.mu.Unlock()
+		if label != "" {
+			if !strings.Contains(label, holder) {
+				t.Fatalf("unexpected mailbox holder: %s", label)
+			}
+			// Once the waiter owns the lease, verify the actual competing-client
+			// refusal and its named holder through the public handler.
+			_, err := checkConsumer(context.Background(), e, caller, "contender", false, false, 0)
+			ref, ok := AsRefusal(err)
+			if !ok || ref.Code != "mailbox_busy" || !strings.Contains(ref.Message, holder) {
+				t.Fatalf("active consumer did not refuse contender with named holder: %v", err)
 			}
 			return
 		}
@@ -115,6 +129,7 @@ func TestConsumerLeaseReleasedAfterSocketDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer client.Close()
 	server, err := ln.Accept()
 	if err != nil {
 		t.Fatal(err)

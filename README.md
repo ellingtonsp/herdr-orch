@@ -235,6 +235,62 @@ receipt meanings, launch metadata flags and restart semantics.
 Statuses: runs `idle|running|completed|failed`, tasks `pending|ready|dispatched|completed|failed|blocked`,
 dispatches `pending|dispatched|completed|failed|circuit_broken`, gates `pending|resolved|timeout`.
 
+## Process cleanup and resource limits
+
+Release also discovers detached helpers whose current directory is inside the worker's
+registered worktree, including nested directories. It sends SIGTERM, waits up to two
+seconds, then sends SIGKILL to remaining eligible processes and checks again. Each
+process is reported with its PID, command, cwd and outcome. The daemon rechecks cwd and
+start identity before every signal. Processes outside the worktree, the daemon and its
+ancestors, and executables named `herdr*` or `horch*` are excluded. A shared live worktree
+refuses ordinary release until the other worker is gone. Explicit hand-off closes only
+the source pane; shared helpers remain with the recipient. Unreadable inventories or surviving
+processes refuse successful release and retain leases.
+
+```sh
+horch sweep --dry-run       # inspect first; no signals or worker-state changes
+horch sweep                 # stop eligible orphan helpers
+```
+
+Sweep considers only worktrees recorded by this daemon that were released/stopped or
+no longer exist. It protects worktrees reused by live or starting workers. It does not
+search arbitrary directories or remove worktrees. Linux reads `/proc`; macOS uses `ps`
+and `lsof`. Cleanup needs permission to inspect and signal the current user's processes.
+Linux excludes nondumpable processes, different security credentials and greater capabilities;
+it does not attempt privileged cleanup.
+A protected or relocated process is explicitly reported as skipped. Helpers that keep
+forking beyond the bounded release passes leave release incomplete for a later retry.
+
+Named leases coordinate resources across herdr sessions sharing the same state root:
+
+```sh
+horch lease acquire --resource sim:DEVICE-UDID --worker builder --ttl 2h
+horch lease acquire --resource port:3000 --worker builder
+horch lease list
+horch dispatch --task t1 --to builder --lease sim:DEVICE-UDID --lease db:acme_test
+horch lease release --resource port:3000 --worker builder
+horch run update --max-load 12 --min-free-mem 15
+```
+
+Leases accept `sim:<udid>`, `port:<1-65535>` and `db:<name>`. The default TTL is one
+hour; acquire again as the same worker to renew. Simulator IDs are case insensitive;
+port numbers are normalized. Acquisition is exclusive and a refusal names the holder
+and session. Dispatch reserves all required resources together before delivering the
+prompt. Existing reservations belonging to that worker are retained. Successful worker
+release frees its leases; explicit hand-off transfers them to the recipient with the same
+expiry. Restart, failed cleanup, stop, abandon and task completion retain leases.
+An expired lease can be acquired by another worker, so choose a TTL covering the work
+or renew it before expiry. These are cooperative reservations: tools must still target
+the declared device, port or database explicitly.
+
+Admission limits default to zero (disabled); set either flag to zero to remove its limit.
+Dispatch refuses with the measured reason before sending a prompt when one-minute load
+exceeds `--max-load` or available memory is below `--min-free-mem` percent. Linux uses
+`MemAvailable`; macOS uses free, inactive and speculative VM pages as reclaimable memory.
+Unreadable metrics fail closed when limits are enabled. These checks also apply to
+`dispatch next` and automatic dispatch; tasks stay ready for a later attempt. Limits
+are sampled at admission and do not pause running workers or reserve CPU/memory.
+
 ## Holds, usage caps and worker recovery
 
 ```bash
@@ -284,6 +340,9 @@ recipient, time and worktree on the released worker and informs the coordinator.
 a helper to leave uncommitted or unpushed work for its owner without `--force`. Active dispatches
 still block release, and the normal process-exit verification still applies. Responsibility
 transfer does not commit, push or delete files. The recipient is reserved during hand-off.
+Only source-pane processes are closed and verified; shared helpers stay with the recipient.
+Leases transfer atomically after successful source cleanup, preserving their expiry. The
+recipient’s registered worktree is updated to the verified shared root for later cleanup.
 
 ## Configuration
 

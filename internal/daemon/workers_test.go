@@ -46,6 +46,7 @@ func TestWorkerStartUsesWorktreeWorkspace(t *testing.T) {
 	setupRun(x)
 	x.h.addPane(coord, "codex", "idle", true)
 	dir := t.TempDir()
+	dir, _ = processRoot(dir)
 	x.h.addPane("w2:p1", "", "unknown", false)
 	x.h.panes["w2:p1"].WorkspaceID = "w2"
 	h := &workerPaneHerdr{fakeHerdr: x.h, selected: *x.h.panes["w2:p1"]}
@@ -69,6 +70,7 @@ func TestWorktreeWorkerRestartPreservesPaneArgsAndHeldTask(t *testing.T) {
 			x := newHarness(t)
 			setupRun(x)
 			dir := t.TempDir()
+			dir, _ = processRoot(dir)
 			x.h.addPane("w2:p1", "", "unknown", false)
 			x.h.panes["w2:p1"].WorkspaceID = "w2"
 			h := &workerPaneHerdr{fakeHerdr: x.h, selected: *x.h.panes["w2:p1"], created: created}
@@ -104,6 +106,7 @@ func TestWorkerStartPreservesLegacyCwd(t *testing.T) {
 	setupRun(x)
 	x.h.addPane(coord, "codex", "idle", true)
 	dir := t.TempDir()
+	dir, _ = processRoot(dir)
 	h := &workerPaneHerdr{fakeHerdr: x.h}
 	x.e.h = h
 	var w store.Worker

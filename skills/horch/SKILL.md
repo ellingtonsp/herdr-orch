@@ -137,6 +137,35 @@ Hand-off requires a live recipient in the same actual git worktree, records who 
 files, and bypasses only the unsaved-work refusal. Active dispatch and process-exit checks still
 apply. `--hand-off-to` cannot be combined with `--force`. Interrupted releases need explicit retry.
 
+
+## Resource leases and admission
+
+```sh
+horch lease acquire --resource sim:DEVICE-UDID --worker N --ttl 2h
+horch lease acquire --resource port:3000 --worker N      # default TTL 1h
+horch lease list
+horch lease release --resource port:3000 --worker N
+horch dispatch --task t1 --to N --lease sim:DEVICE-UDID --lease db:acme_test
+horch run update --max-load 12 --min-free-mem 15          # zero disables each limit
+horch sweep --dry-run                                  # report orphan helpers
+horch sweep                                            # stop them
+```
+
+Leases are shared across sessions using the same plugin state root. A conflict names
+its holder; dispatch reserves all requested leases before delivery. Renew with acquire
+as the same worker before TTL expires. Successful worker release frees leases; hand-off
+transfers them to the recipient with unchanged expiry, and restart retains them. Failed
+cleanup, stop and task completion retain them. Leases are cooperative: always give tools
+the explicit leased device/port/database. Limits check one-minute load and available or
+reclaimable memory on macOS/Linux; a refusal leaves work ready for a later attempt.
+
+Release discovers detached processes by cwd inside the registered worktree, rechecks
+identity/scope before TERM then KILL, and reports outcomes. It excludes outside processes,
+`herdr*`/`horch*`, the daemon and its ancestors. Shared live/starting worktrees refuse
+ordinary cleanup. Explicit hand-off closes only the source pane and preserves shared helpers. Inventory errors and survivors keep release incomplete and retain leases.
+Sweep only considers recorded released/stopped or missing worktrees; live reused scopes
+are protected. Dry-run sends no signals. Neither command removes worktrees.
+
 ## Gates and schedules
 
 ```bash

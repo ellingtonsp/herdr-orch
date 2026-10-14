@@ -27,7 +27,7 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch run create --title T [--auto-dispatch] [--max-attempts N]
   horch run use <run> | current | list | show [--run R]
   horch run update [--run R] [--status S] [--coordinator me|PANE] [--auto on|off] [--max-attempts N]
-                   [--idle-report 10m] [--flag-idle 30m|0]
+                   [--idle-report 10m] [--flag-idle 30m|0] [--max-load N] [--min-free-mem PCT]
 
   horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation] [--wait-pickup] [--timeout 5m]
   horch done [--task T] --body B [--failed]          (report a dispatched task finished)
@@ -37,7 +37,7 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
 
   horch task create --title T [--spec S | --spec-file F] [--deps a,b]
   horch task list | show --id T | update --id T [--status S] [--deps a,b] [--reset-attempts] ...
-  horch dispatch --task T --to PANE|NAME|new:<agent> [--cwd DIR]     horch dispatch --spec S --to ...
+  horch dispatch --task T --to PANE|NAME|new:<agent> [--cwd DIR] [--lease RESOURCE]     horch dispatch --spec S --to ...
   horch dispatch show --task T | --id D              horch dispatch next [--run R]
   horch dispatch nudge --task T [--text S] [--force]  (remind an idle worker to report)
   horch dispatch fail --task T --reason R [--infra]  (infra refunds the attempt)
@@ -52,6 +52,10 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch worker restart --worker W [--env KEY=VAL] [--unset KEY]
   horch worker release --worker W [--hand-off-to W]
   horch worker list [--all]
+
+  horch lease acquire --resource sim:<udid>|port:<n>|db:<name> --worker PANE|NAME [--ttl 1h]
+  horch lease release --resource RESOURCE --worker PANE|NAME   horch lease list
+  horch sweep [--dry-run]
 
   horch gate create [--task T] --question Q [--options a,b] [--timeout 1h]
   horch gate resolve --id G --decision D             horch gate list [--all]
@@ -190,6 +194,10 @@ func dispatch(ctx context.Context, args []string) error {
 		sub = rest[0]
 	}
 	switch cmd {
+	case "lease":
+		return cmdLease(ctx, sub, tail(rest))
+	case "sweep":
+		return cmdSweep(ctx, rest)
 	case "run":
 		return cmdRun(ctx, sub, tail(rest))
 	case "send":
@@ -325,6 +333,8 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 	autoS := f.String("auto", "", "")
 	idleReport := f.String("idle-report", "", "")
 	flagIdle := f.String("flag-idle", "", "")
+	maxLoad := f.Float64("max-load", 0, "")
+	minFreeMem := f.Float64("min-free-mem", 0, "")
 	pos, err := parse(f, args)
 	if err != nil {
 		return err
@@ -357,6 +367,14 @@ func cmdRun(ctx context.Context, sub string, args []string) error {
 		if *maxA > 0 {
 			a.MaxAttempts = maxA
 		}
+		f.Visit(func(fl *flag.Flag) {
+			if fl.Name == "max-load" {
+				a.MaxLoad = maxLoad
+			}
+			if fl.Name == "min-free-mem" {
+				a.MinFreeMem = minFreeMem
+			}
+		})
 		if *idleReport != "" {
 			ms, err := durMS(*idleReport)
 			if err != nil {
@@ -593,6 +611,16 @@ func cmdDispatch(ctx context.Context, args []string) error {
 	f.StringVar(&a.Cwd, "cwd", "", "")
 	f.StringVar(&a.Cwd, "worktree", "", "")
 	f.StringVar(&a.Name, "name", "", "")
+	f.Func("lease", "", func(value string) error {
+		for _, r := range strings.Split(value, ",") {
+			r = strings.TrimSpace(r)
+			if _, err := store.NormalizeResource(r); err != nil {
+				return err
+			}
+			a.Leases = append(a.Leases, r)
+		}
+		return nil
+	})
 	if _, err := parse(f, args); err != nil {
 		return err
 	}
@@ -712,18 +740,7 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	case "show", "retain", "abandon":
 		return run(ctx, "worker."+sub, ref, nil)
 	case "stop", "release":
-		return run(ctx, "worker."+sub, ref, func(raw json.RawMessage) {
-			var r daemon.CloseResult
-			_ = json.Unmarshal(raw, &r)
-			fmt.Printf("%s %s: pane closed, %d process(es) verified gone", r.Worker.PaneID, r.Worker.State, len(r.PIDs))
-			if len(r.Killed) > 0 {
-				fmt.Printf(" (signalled %v)", r.Killed)
-			}
-			if r.ArchivePath != "" {
-				fmt.Printf("; transcript %s", r.ArchivePath)
-			}
-			fmt.Println()
-		})
+		return run(ctx, "worker."+sub, ref, printCloseResult)
 	}
 	return usageErr("unknown worker subcommand %q", sub)
 }

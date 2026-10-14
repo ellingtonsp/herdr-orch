@@ -18,18 +18,19 @@ import (
 
 // fakeHerdr records calls and serves canned pane state.
 type fakeHerdr struct {
-	mu           sync.Mutex
-	panes        map[string]*herdr.Pane
-	prompts      map[string][]string
-	typed        map[string][]string
-	notes        []string
-	closed       []string
-	pids         map[string][]int
-	named        map[string]bool // panes herdr manages (agent.prompt works)
-	nextPane     int
-	notReady     map[string]int // named panes that refuse prompts this many more times
-	startTimeout bool           // AgentStart reports herdr's timeout but the agent comes up anyway
-	killOnClose  bool
+	processInfoErr error
+	mu             sync.Mutex
+	panes          map[string]*herdr.Pane
+	prompts        map[string][]string
+	typed          map[string][]string
+	notes          []string
+	closed         []string
+	pids           map[string][]int
+	named          map[string]bool // panes herdr manages (agent.prompt works)
+	nextPane       int
+	notReady       map[string]int // named panes that refuse prompts this many more times
+	startTimeout   bool           // AgentStart reports herdr's timeout but the agent comes up anyway
+	killOnClose    bool
 }
 
 func newFake() *fakeHerdr {
@@ -97,6 +98,9 @@ func (f *fakeHerdr) PaneTokens(context.Context, string, map[string]*string) erro
 func (f *fakeHerdr) ProcessInfo(_ context.Context, id string) (herdr.ProcessInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.processInfoErr != nil {
+		return herdr.ProcessInfo{}, f.processInfoErr
+	}
 	if _, ok := f.panes[id]; !ok {
 		return herdr.ProcessInfo{}, &herdr.Error{Code: "pane_not_found", Message: id}
 	}
@@ -684,13 +688,16 @@ func TestSendToRunBroadcasts(t *testing.T) {
 	}
 }
 
-func startSleeper(t *testing.T, ignoreHUP bool) int {
+func startSleeper(t *testing.T, ignoreHUP bool, dirs ...string) int {
 	t.Helper()
 	script := "exec sleep 60"
 	if ignoreHUP {
 		script = "trap '' HUP TERM; while :; do sleep 0.1; done"
 	}
 	cmd := exec.Command("sh", "-c", script)
+	if len(dirs) > 0 {
+		cmd.Dir = dirs[0]
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +723,11 @@ func TestReleaseVerifiesProcessesGone(t *testing.T) {
 func TestReleaseKillsStragglers(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:p2")
-	pid := startSleeper(t, true) // ignores HUP and TERM: needs SIGKILL
+	dir := t.TempDir()
+	w, _ := x.st.GetWorker("w1:p2")
+	w.Worktree = dir
+	x.st.RegisterWorker(w)
+	pid := startSleeper(t, true, dir) // ignores HUP and TERM: needs SIGKILL
 	x.h.pids["w1:p2"] = []int{pid}
 	var res CloseResult
 	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:p2"}, &res)
@@ -907,7 +918,8 @@ func TestWorkerStartInExistingPane(t *testing.T) {
 	x.h.pids["w2:p1"] = []int{2_000_000_000}
 	var w store.Worker
 	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "codex", Name: "it-codex", Pane: "w2:p1"}, &w)
-	if w.PaneID != "w2:p1" || w.Worktree != cwd || x.h.nextPane != 0 {
+	canonical, _ := processRoot(cwd)
+	if w.PaneID != "w2:p1" || w.Worktree != canonical || x.h.nextPane != 0 {
 		t.Fatalf("worker %+v newTabs=%d", w, x.h.nextPane)
 	}
 	_, err := x.op(coord, "worker.start", WorkerStartArgs{Agent: "pi", Pane: "w2:p1", Name: "again"})

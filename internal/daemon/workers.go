@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +54,8 @@ func (e *Engine) opWorkerStart(ctx context.Context, caller string, raw json.RawM
 // pane, or opens a tab in the caller's workspace. An agent that comes up blocked
 // (e.g. a folder-trust prompt) is registered and escalated, never answered automatically.
 func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartArgs) (store.Worker, error) {
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
 	if a.Agent == "" {
 		return store.Worker{}, refusal("bad_args", "--agent is required (claude|pi|codex|...)")
 	}
@@ -89,6 +92,17 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 		}
 		a.Cwd = abs
 	}
+	if a.Cwd != "" {
+		a.Cwd, err = processRoot(a.Cwd)
+		if err != nil {
+			return store.Worker{}, refusal("bad_cwd", "%v", err)
+		}
+		release, err := e.reserveStarting(a.Cwd)
+		if err != nil {
+			return store.Worker{}, err
+		}
+		defer release()
+	}
 	if a.Name == "" {
 		ws, _ := e.st.ListWorkers("", false)
 		a.Name = fmt.Sprintf("%s-%s-%d", strings.ToLower(a.Agent), run.ID, len(ws)+1)
@@ -109,12 +123,32 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 		if p.Agent != nil && *p.Agent != "" {
 			return store.Worker{}, refusal("pane_busy", "pane %s already runs %s", a.Pane, *p.Agent)
 		}
+		if a.Cwd != "" {
+			if p.Cwd == nil {
+				return store.Worker{}, refusal("bad_cwd", "cannot verify existing pane cwd")
+			}
+			actual, err := processRoot(*p.Cwd)
+			if err != nil {
+				return store.Worker{}, err
+			}
+			if actual != a.Cwd {
+				return store.Worker{}, refusal("cwd_mismatch", "existing pane cwd differs from --worktree; change the pane directory first")
+			}
+		}
 		info, err := e.h.ProcessInfo(ctx, a.Pane)
 		if err != nil || !info.AvailableShell() {
 			return store.Worker{}, refusal("pane_busy", "pane %s is not an available shell", a.Pane)
 		}
 		if a.Cwd == "" && p.Cwd != nil {
-			a.Cwd = *p.Cwd
+			a.Cwd, err = processRoot(*p.Cwd)
+			if err != nil {
+				return store.Worker{}, refusal("bad_cwd", "%v", err)
+			}
+			release, err := e.reserveStarting(a.Cwd)
+			if err != nil {
+				return store.Worker{}, err
+			}
+			defer release()
 		}
 		pane = p
 	} else {
@@ -147,6 +181,22 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 				cancel()
 			}
 			return store.Worker{}, fmt.Errorf("create tab: %w", err)
+		}
+	}
+	// New tabs may inherit cwd when none was requested. Capture the actual
+	// pane cwd while launch/cleanup serialization protects the unregistered pane.
+	if ownPane && a.Cwd == "" {
+		live := pane
+		if live.Cwd == nil {
+			if p, err := e.h.PaneGet(ctx, pane.PaneID); err == nil {
+				live = p
+			}
+		}
+		if live.Cwd != nil {
+			a.Cwd, err = processRoot(*live.Cwd)
+			if err != nil {
+				return store.Worker{}, refusal("bad_cwd", "%v", err)
+			}
 		}
 	}
 	// A fresh tab's shell is still starting (profile, prompt) for a moment; herdr
@@ -184,6 +234,12 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 			return store.Worker{}, fmt.Errorf("start %s: %w", a.Agent, startErr)
 		}
 	}
+	if a.Cwd != "" {
+		a.Cwd, err = processRoot(a.Cwd)
+		if err != nil {
+			return store.Worker{}, refusal("bad_cwd", "%v", err)
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, AgentArgs: a.Args, LaunchKnown: true, Account: a.Account, Profile: a.Profile, Model: a.Model})
@@ -211,6 +267,8 @@ type WorkerRegisterArgs struct {
 
 // opWorkerRegister adopts an existing agent pane as a worker of the run.
 func (e *Engine) opWorkerRegister(ctx context.Context, caller string, raw json.RawMessage) (any, error) {
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
 	a, err := decode[WorkerRegisterArgs](raw)
 	if err != nil {
 		return nil, err
@@ -233,8 +291,30 @@ func (e *Engine) opWorkerRegister(ctx context.Context, caller string, raw json.R
 	if a.Worktree == "" && p.Cwd != nil {
 		a.Worktree = *p.Cwd
 	}
+	if a.Worktree != "" {
+		a.Worktree, err = processRoot(a.Worktree)
+		if err != nil {
+			return nil, refusal("bad_cwd", "%v", err)
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closing[a.Pane] {
+		return nil, refusal("worker_closing", "worker %s is closing", a.Pane)
+	}
+	for pane := range e.closing {
+		other, err := e.st.GetWorker(pane)
+		if err != nil {
+			return nil, err
+		}
+		root, err := processRoot(other.Worktree)
+		if err != nil {
+			return nil, err
+		}
+		if root != "" && a.Worktree != "" && (insideWorktree(root, a.Worktree) || insideWorktree(a.Worktree, root)) {
+			return nil, refusal("worktree_in_use", "worker %s is closing", pane)
+		}
+	}
 	w, err := e.st.RegisterWorker(store.Worker{PaneID: a.Pane, RunID: run.ID, Name: a.Name, Agent: agent, Worktree: a.Worktree})
 	if err == nil {
 		e.status[a.Pane] = p.AgentStatus
@@ -473,11 +553,37 @@ func (e *Engine) opWorkerRestart(ctx context.Context, caller string, raw json.Ra
 	default:
 		return nil, refusal("restart_unsupported", "no clean exit command is known for agent %s", w.Agent)
 	}
+	sameRegistration := func(current store.Worker) bool {
+		return current.PaneID == w.PaneID && current.RunID == w.RunID && current.Worktree == w.Worktree && current.Name == w.Name && current.State == w.State && current.StartedAt == w.StartedAt && current.Agent == w.Agent && current.Account == w.Account && current.Profile == w.Profile && current.Model == w.Model && current.LaunchKnown == w.LaunchKnown && slices.Equal(current.AgentArgs, w.AgentArgs)
+	}
 	e.mu.Lock()
+	current, currentErr := e.st.GetWorker(w.PaneID)
+	if currentErr != nil {
+		e.mu.Unlock()
+		return nil, currentErr
+	}
+	if !sameRegistration(current) {
+		e.mu.Unlock()
+		return nil, refusal("worker_changed", "worker registration changed; retry restart")
+	}
 	err = e.st.BeginWorkerLifecycle(w.PaneID, "restart")
 	e.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
+	// A process owner already holding the lock may finish replacing this pane
+	// while restart waits. Check before pane mutation and before installing any
+	// failure cleanup that could write restart_failed onto its replacement.
+	e.mu.Lock()
+	current, currentErr = e.st.GetWorker(w.PaneID)
+	e.mu.Unlock()
+	if currentErr != nil {
+		return nil, currentErr
+	}
+	if !sameRegistration(current) || current.Lifecycle != "restart" {
+		return nil, refusal("worker_changed", "worker registration changed; retry restart")
 	}
 	defer func() {
 		e.mu.Lock()
@@ -663,18 +769,11 @@ func (e *Engine) opWorkerStop(ctx context.Context, caller string, raw json.RawMe
 			return nil, e.refuseUnsaved(w, "stop", reasons)
 		}
 	}
-	e.mu.Lock()
-	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
-		st, err := e.st.Fence(d.ID, "worker stopped")
-		if err != nil {
-			e.mu.Unlock()
-			return nil, err
-		}
-		e.afterFenceLocked(st)
+	res, err := e.closeWorker(ctx, w, store.WorkerStopped, false, closeOptions{Force: true, AllowPending: restorePhase == "restart_failed" || restorePhase == "release_interrupted"})
+	if err == nil {
+		restorePhase = ""
 	}
-	restorePhase = ""
-	e.mu.Unlock()
-	return e.closeWorker(ctx, w, store.WorkerStopped, false)
+	return res, err
 }
 
 // opWorkerRelease archives the worker's output, closes its pane and verifies every process
@@ -707,6 +806,7 @@ func (e *Engine) opWorkerRelease(ctx context.Context, caller string, raw json.Ra
 	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil && !a.Force {
 		return nil, refusal("worker_busy", "worker %s has active dispatch %s (task %s); wait for it or use `horch worker stop`", w.PaneID, d.ID, d.TaskID)
 	}
+	handOffPane := ""
 	if a.HandOffTo != "" {
 		if a.Force {
 			return nil, refusal("bad_args", "--hand-off-to cannot be combined with --force")
@@ -728,6 +828,7 @@ func (e *Engine) opWorkerRelease(ctx context.Context, caller string, raw json.Ra
 		}
 		e.mu.Unlock()
 		defer e.finishWorkerLifecycle(target.PaneID, "")
+		handOffPane = target.PaneID
 		root, err := e.handOffRoot(ctx, w, target)
 		if err != nil {
 			return nil, err
@@ -746,18 +847,11 @@ func (e *Engine) opWorkerRelease(ctx context.Context, caller string, raw json.Ra
 			return nil, e.refuseUnsaved(w, "release", reasons)
 		}
 	}
-	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
-		e.mu.Lock()
-		st, err := e.st.Fence(d.ID, "worker released")
-		if err != nil {
-			e.mu.Unlock()
-			return nil, err
-		}
-		e.afterFenceLocked(st)
-		e.mu.Unlock()
+	res, err := e.closeWorker(ctx, w, store.WorkerReleased, true, closeOptions{Force: a.Force, HandOff: handOffPane, AllowPending: restorePhase == "release_interrupted"})
+	if err == nil {
+		restorePhase = ""
 	}
-	restorePhase = ""
-	return e.closeWorker(ctx, w, store.WorkerReleased, true)
+	return res, err
 }
 
 func actualWorktree(ctx context.Context, h Herdr, w store.Worker) (string, error) {
@@ -810,18 +904,104 @@ func (e *Engine) refuseUnsaved(w store.Worker, verb string, reasons []string) er
 }
 
 type CloseResult struct {
-	Worker      store.Worker `json:"worker"`
-	ArchivePath string       `json:"archive_path,omitempty"`
-	PIDs        []int        `json:"pids"`
-	Killed      []int        `json:"killed,omitempty"`
-	Survivors   []int        `json:"survivors,omitempty"`
+	Processes   []ProcessOutcome `json:"processes,omitempty"`
+	Worker      store.Worker     `json:"worker"`
+	ArchivePath string           `json:"archive_path,omitempty"`
+	PIDs        []int            `json:"pids"`
+	Killed      []int            `json:"killed,omitempty"`
+	Survivors   []int            `json:"survivors,omitempty"`
 }
 
 // closeWorker optionally archives the transcript, closes the pane and verifies every
 // recorded process is gone, escalating to SIGTERM/SIGKILL for stragglers. It never reports
 // success while a process from the pane is still alive.
-func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, archive bool) (CloseResult, error) {
-	res := CloseResult{}
+type closeOptions struct {
+	Force        bool
+	HandOff      string
+	AllowPending bool
+}
+
+func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, archive bool, options ...closeOptions) (CloseResult, error) {
+	opt := closeOptions{}
+	if len(options) > 0 {
+		opt = options[0]
+	}
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
+	res := CloseResult{Worker: w}
+	root, rootErr := processRoot(w.Worktree)
+	if rootErr != nil {
+		return res, refusal("process_scan_failed", "%v", rootErr)
+	}
+	e.mu.Lock()
+	current, currentErr := e.st.GetWorker(w.PaneID)
+	if currentErr != nil {
+		e.mu.Unlock()
+		return res, currentErr
+	}
+	if current.RunID != w.RunID || current.Worktree != w.Worktree || current.Name != w.Name || current.State != w.State || current.StartedAt != w.StartedAt {
+		e.mu.Unlock()
+		return res, refusal("worker_changed", "worker registration changed; retry cleanup")
+	}
+	if opt.HandOff != "" {
+		if current.HandOffTo != opt.HandOff || current.HandOffWorktree == "" {
+			e.mu.Unlock()
+			return res, refusal("invalid_hand_off", "missing verified responsibility transfer")
+		}
+		root, rootErr = processRoot(current.HandOffWorktree)
+		if rootErr != nil {
+			e.mu.Unlock()
+			return res, rootErr
+		}
+	}
+	if root != "" && opt.HandOff == "" {
+		for r, n := range e.starting {
+			if n > 0 && (insideWorktree(root, r) || insideWorktree(r, root)) {
+				e.mu.Unlock()
+				return res, refusal("worktree_in_use", "a worker is starting in %s", r)
+			}
+		}
+		ws, err := e.st.ListWorkers("", true)
+		if err != nil {
+			e.mu.Unlock()
+			return res, err
+		}
+		for _, other := range ws {
+			if other.PaneID == w.PaneID {
+				continue
+			}
+			r, err := processRoot(other.Worktree)
+			if err != nil {
+				e.mu.Unlock()
+				return res, err
+			}
+			if r != "" && (insideWorktree(root, r) || insideWorktree(r, root)) {
+				e.mu.Unlock()
+				return res, refusal("worktree_in_use", "worktree overlaps live worker %s (%s)", other.Name, other.PaneID)
+			}
+		}
+	}
+	if e.closing[w.PaneID] {
+		e.mu.Unlock()
+		return res, refusal("worker_closing", "worker %s is already closing", w.PaneID)
+	}
+	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
+		if (d.Status == store.DispatchPending && !opt.AllowPending) || (final == store.WorkerReleased && !opt.Force) {
+			e.mu.Unlock()
+			return res, refusal("worker_busy", "worker %s has active dispatch %s", w.PaneID, d.ID)
+		}
+	}
+	e.closing[w.PaneID] = true
+	defer func() { e.mu.Lock(); delete(e.closing, w.PaneID); e.mu.Unlock() }()
+	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
+		st, err := e.st.Fence(d.ID, "worker closed")
+		if err != nil {
+			e.mu.Unlock()
+			return res, err
+		}
+		e.afterFenceLocked(st)
+	}
+	e.mu.Unlock()
 	if archive {
 		if text, err := e.h.PaneRead(ctx, w.PaneID, 10000); err == nil && e.cfg.ArchiveDir != "" {
 			p := filepath.Join(e.cfg.ArchiveDir, fmt.Sprintf("%s-%s.txt", paths.Safe(w.PaneID), time.Now().Format("20060102-150405")))
@@ -830,55 +1010,157 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 			}
 		}
 	}
+	var scanErr error
+	host := e.processHost()
+	var snapshot []ProcessRecord
+	if scanErr == nil && root != "" {
+		snapshot, scanErr = host.List(ctx)
+	}
+	if scanErr != nil {
+		return res, refusal("process_scan_failed", "cannot inspect worktree processes: %v", scanErr)
+	}
 	info, infoErr := e.h.ProcessInfo(ctx, w.PaneID)
+	if infoErr != nil && herdr.ErrCode(infoErr) != "pane_not_found" {
+		return res, refusal("process_scan_failed", "cannot inspect pane before closing: %v", infoErr)
+	}
+	paneProcesses := map[int]ProcessRecord{}
 	if infoErr == nil {
 		res.PIDs = info.PIDs()
-	}
-	e.mu.Lock()
-	e.closing[w.PaneID] = true
-	e.mu.Unlock()
-	defer func() {
-		e.mu.Lock()
-		delete(e.closing, w.PaneID)
-		e.mu.Unlock()
-	}()
-	closeErr := e.h.PaneClose(ctx, w.PaneID)
-	if closeErr != nil && infoErr != nil {
-		// Pane already gone and we never saw its processes: nothing left to verify.
-		res.PIDs = nil
-	}
-	res.Survivors = waitGone(res.PIDs, 5*time.Second)
-	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		if len(res.Survivors) == 0 {
-			break
+		for _, pid := range res.PIDs {
+			if p, err := host.Inspect(ctx, pid); err == nil {
+				paneProcesses[pid] = p
+			} else if !os.IsNotExist(err) {
+				scanErr = err
+			}
+
 		}
-		for _, pid := range res.Survivors {
-			if syscall.Kill(pid, sig) == nil {
-				res.Killed = append(res.Killed, pid)
+	}
+	for _, p := range paneProcesses {
+		if protectedProcess(p, processAncestors(snapshot)) {
+			return res, refusal("protected_process", "pane contains protected process %d (%s)", p.PID, p.Command)
+		}
+	}
+	if scanErr != nil {
+		return res, refusal("process_scan_failed", "cannot verify pane processes: %v", scanErr)
+	}
+	if opt.HandOff != "" {
+		targetInfo, err := e.h.ProcessInfo(ctx, opt.HandOff)
+		if err != nil {
+			return res, refusal("process_scan_failed", "cannot verify hand-off recipient processes: %v", err)
+		}
+		for _, pid := range targetInfo.PIDs() {
+			if _, overlap := paneProcesses[pid]; overlap {
+				return res, refusal("protected_process", "source and recipient share process %d", pid)
 			}
 		}
-		res.Survivors = waitGone(res.Survivors, 2*time.Second)
+	}
+	closeErr := e.h.PaneClose(ctx, w.PaneID)
+	if closeErr != nil && herdr.ErrCode(closeErr) != "pane_not_found" {
+		scanErr = fmt.Errorf("pane close was not verified: %w", closeErr)
+	}
+	if root != "" {
+		// Include helpers forked between the first inventory and pane closure.
+		after, err := host.List(ctx)
+		if err != nil {
+			scanErr = err
+		} else {
+			seen := map[int]bool{}
+			for _, p := range snapshot {
+				seen[p.PID] = true
+			}
+			for _, p := range after {
+				if !seen[p.PID] {
+					snapshot = append(snapshot, p)
+				}
+			}
+		}
+		var cleanupErr error
+		if opt.HandOff != "" {
+			// Helpers outside the source pane now belong to the recipient. Restrict
+			// signals to the source pane's proven identities even within shared cwd.
+			seen := map[int]bool{}
+			for _, p := range snapshot {
+				seen[p.PID] = true
+			}
+			for pid, p := range paneProcesses {
+				if !seen[pid] {
+					snapshot = append(snapshot, p)
+				}
+			}
+			res.Processes = e.cleanProcesses(ctx, root, snapshot, false, func(p ProcessRecord) bool { old, ok := paneProcesses[p.PID]; return ok && old.Started == p.Started })
+		} else {
+			res.Processes, cleanupErr = e.cleanProcessScope(ctx, root, snapshot, false)
+		}
+		if cleanupErr != nil {
+			scanErr = cleanupErr
+		}
+	}
+
+	seen := map[int]bool{}
+	for _, pid := range res.PIDs {
+		seen[pid] = true
+	}
+	for _, p := range res.Processes {
+		if !seen[p.PID] {
+			res.PIDs = append(res.PIDs, p.PID)
+			seen[p.PID] = true
+		}
+		switch p.Action {
+		case "terminated", "killed":
+			res.Killed = append(res.Killed, p.PID)
+		case "term", "kill", "unverified":
+			res.Survivors = append(res.Survivors, p.PID)
+		}
+	}
+	// Pane processes outside the worktree are verified but never directly signalled.
+	// Use their start identity so a recycled PID cannot fail or broaden cleanup.
+	for pid, old := range paneProcesses {
+		p, err := host.Inspect(ctx, pid)
+		if err == nil && p.Started == old.Started && !protectedProcess(p, processAncestors(snapshot)) {
+			found := false
+			for _, id := range res.Survivors {
+				if id == pid {
+					found = true
+				}
+			}
+			if !found {
+				res.Survivors = append(res.Survivors, pid)
+			}
+		} else if err != nil && !os.IsNotExist(err) {
+			scanErr = err
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.status, w.PaneID)
-	if len(res.Survivors) > 0 {
-		_ = e.st.SetWorkerState(w.PaneID, store.WorkerReleaseFailed, fmt.Sprintf("processes still alive: %v", res.Survivors), res.ArchivePath)
+	if len(res.Survivors) > 0 || scanErr != nil {
+		_ = e.st.SetWorkerState(w.PaneID, store.WorkerReleaseFailed, fmt.Sprintf("processes still alive: %v; inventory error: %v", res.Survivors, scanErr), res.ArchivePath)
 		res.Worker, _ = e.st.GetWorker(w.PaneID)
 		e.escalateLocked(w.RunID, fmt.Sprintf("worker %s: processes survived close", w.PaneID),
 			fmt.Sprintf("After closing pane %s, processes %v are still alive even after SIGKILL. Check them with `ps -p`.", w.PaneID, res.Survivors), "")
 		e.notify.broadcast()
-		return res, refusal("release_failed", "pane %s closed but processes %v are still alive", w.PaneID, res.Survivors)
+		return res, refusal("release_failed", "pane %s cleanup incomplete; survivors %v; inventory error: %v", w.PaneID, res.Survivors, scanErr)
 	}
 	if closeErr != nil && infoErr == nil {
 		// Close failed but the processes we saw are gone.
 		e.logf("close %s: %v (processes gone)", w.PaneID, closeErr)
 	}
-	note := fmt.Sprintf("closed; %d process(es) verified gone", len(res.PIDs))
+	note := fmt.Sprintf("closed; %d process(es) observed; cleanup verified for eligible worktree processes", len(res.PIDs))
+	if opt.HandOff != "" {
+		note = fmt.Sprintf("closed; %d source process(es) observed; shared helpers handed off to %s", len(res.PIDs), opt.HandOff)
+	}
 	if infoErr != nil && closeErr != nil {
 		note = "pane already gone"
 	}
-	_ = e.st.SetWorkerState(w.PaneID, final, note, res.ArchivePath)
+	var stateErr error
+	if final == store.WorkerReleased {
+		stateErr = e.st.ReleaseWorkerWithLeases(w.PaneID, note, res.ArchivePath, opt.HandOff)
+	} else {
+		stateErr = e.st.SetWorkerState(w.PaneID, final, note, res.ArchivePath)
+	}
+	if stateErr != nil {
+		return res, stateErr
+	}
 	res.Worker, _ = e.st.GetWorker(w.PaneID)
 	e.badgeTask(w.PaneID, "")
 	e.recomputeWatch()

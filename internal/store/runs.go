@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"math"
 )
 
 type Run struct {
@@ -15,16 +16,18 @@ type Run struct {
 	// before the coordinator is told (0 = daemon default).
 	IdleReportMS int64 `json:"idle_report_ms,omitempty"`
 	// IdleFlagMS > 0 flags live, unretained workers that sit that long with no dispatch.
-	IdleFlagMS int64 `json:"idle_flag_ms,omitempty"`
-	CreatedAt  int64 `json:"created_at"`
-	UpdatedAt  int64 `json:"updated_at"`
+	IdleFlagMS int64   `json:"idle_flag_ms,omitempty"`
+	MaxLoad    float64 `json:"max_load,omitempty"`
+	MinFreeMem float64 `json:"min_free_mem,omitempty"`
+	CreatedAt  int64   `json:"created_at"`
+	UpdatedAt  int64   `json:"updated_at"`
 }
 
-const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,auto_dispatch,max_attempts,idle_report_ms,idle_flag_ms,created_at,updated_at`
+const runCols = `id,title,COALESCE(coordinator_pane_id,''),status,auto_dispatch,max_attempts,idle_report_ms,idle_flag_ms,max_load,min_free_mem,created_at,updated_at`
 
 func scanRun(r interface{ Scan(...any) error }) (Run, error) {
 	var x Run
-	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.AutoDispatch, &x.MaxAttempts, &x.IdleReportMS, &x.IdleFlagMS, &x.CreatedAt, &x.UpdatedAt)
+	err := r.Scan(&x.ID, &x.Title, &x.CoordinatorPaneID, &x.Status, &x.AutoDispatch, &x.MaxAttempts, &x.IdleReportMS, &x.IdleFlagMS, &x.MaxLoad, &x.MinFreeMem, &x.CreatedAt, &x.UpdatedAt)
 	return x, err
 }
 
@@ -117,6 +120,8 @@ type RunUpdate struct {
 	Title        *string
 	IdleReportMS *int64
 	IdleFlagMS   *int64
+	MaxLoad      *float64
+	MinFreeMem   *float64
 }
 
 func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
@@ -171,6 +176,24 @@ func (s *Store) UpdateRun(id string, u RunUpdate) (Run, error) {
 				return refuse("bad_value", "idle flag delay must be >= 0")
 			}
 			if _, err := tx.Exec(`UPDATE runs SET idle_flag_ms=?,updated_at=? WHERE id=?`, *u.IdleFlagMS, now, id); err != nil {
+				return err
+			}
+		}
+		if u.MaxLoad != nil {
+			v := *u.MaxLoad
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				return refuse("bad_value", "max load must be >= 0 (0 disables)")
+			}
+			if _, err := tx.Exec(`UPDATE runs SET max_load=?,updated_at=? WHERE id=?`, v, now, id); err != nil {
+				return err
+			}
+		}
+		if u.MinFreeMem != nil {
+			v := *u.MinFreeMem
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
+				return refuse("bad_value", "minimum free memory must be 0..100 percent (0 disables)")
+			}
+			if _, err := tx.Exec(`UPDATE runs SET min_free_mem=?,updated_at=? WHERE id=?`, v, now, id); err != nil {
 				return err
 			}
 		}

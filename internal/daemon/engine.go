@@ -35,6 +35,8 @@ type Herdr interface {
 }
 
 type Config struct {
+	// SystemMetrics overrides host capacity collection (nil uses the OS).
+	SystemMetrics func(context.Context) (HostMetrics, error)
 	// IdleReportAfter is how long a dispatched worker may sit idle after working, with no
 	// `horch done`, before the coordinator is told (once per idle episode). The dispatch is
 	// never failed for this: long loops, CI waits and background jobs look the same.
@@ -66,13 +68,17 @@ func DefaultConfig() Config {
 }
 
 type Engine struct {
-	mu     sync.Mutex
-	st     *store.Store
-	h      Herdr
-	cfg    Config
-	notify notifier
-	hub    planHub
-	logf   func(string, ...any)
+	processMu    sync.Mutex // serialize process launch, registration and cleanup
+	starting     map[string]int
+	processes    processHost
+	processGrace time.Duration
+	mu           sync.Mutex
+	st           *store.Store
+	h            Herdr
+	cfg          Config
+	notify       notifier
+	hub          planHub
+	logf         func(string, ...any)
 
 	status      map[string]string         // pane → last known agent status
 	blocked     map[string]time.Time      // pane → when its current blocked episode began
@@ -343,6 +349,11 @@ func (e *Engine) paneGone(pane, why string) {
 }
 
 func (e *Engine) worktreeRemoved(path string) {
+	normalized, err := processRoot(path)
+	if err != nil {
+		return
+	}
+	path = normalized
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	ws, err := e.st.ListWorkers("", true)

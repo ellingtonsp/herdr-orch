@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Process hygiene.** Worker release discovers detached helpers by worktree cwd on
+  macOS/Linux, rechecks identity and scope before TERM/KILL, protects orchestration
+  processes and reports outcomes. `horch sweep [--dry-run]` handles recorded released
+  or removed worktrees while excluding reused live scopes.
+- **Resource leases.** `horch lease acquire|release|list`, optional `--ttl`, and repeatable
+  dispatch `--lease` reserve named simulator, port and database resources across sessions.
+  Successful worker release frees leases; hand-off transfers them with unchanged expiry,
+  restart retains them, and conflicts name the holder.
+- **Admission control.** `horch run update --max-load N --min-free-mem PCT` adds optional
+  macOS/Linux capacity checks before manual or automatic dispatch, with explicit refusals.
 - **Message delivery receipts.** Sends and replies wait for an interactive idle agent,
   track submission separately from pickup, recover collapsed pastes, retry once and
   escalate unconfirmed delivery. `send --wait-pickup [--timeout D]` waits for evidence;

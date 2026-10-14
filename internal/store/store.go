@@ -5,10 +5,13 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -71,11 +74,18 @@ func refuse(code, format string, a ...any) error {
 var ErrNotFound = errors.New("not found")
 
 type Store struct {
-	db  *sql.DB
-	Now func() time.Time
+	db         *sql.DB
+	leaseScope string
+	Now        func() time.Time
 }
 
 func Open(path string) (*Store, error) {
+	return OpenWithLeaseRegistry(path, path+".leases")
+}
+
+// OpenWithLeaseRegistry joins session state to a shared host resource registry.
+// Only daemon startup uses a shared path; Open keeps tests and standalone stores isolated.
+func OpenWithLeaseRegistry(path, registry string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -86,6 +96,24 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if resolved, e := filepath.EvalSymlinks(absolute); e == nil {
+		absolute = resolved
+	}
+	sum := sha256.Sum256([]byte(absolute))
+	s.leaseScope = hex.EncodeToString(sum[:8])
+	if _, err := db.Exec(`ATTACH DATABASE ? AS lease_registry`, registry); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("attach lease registry: %w", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS lease_registry.leases(resource TEXT PRIMARY KEY,worker TEXT NOT NULL,holder_name TEXT NOT NULL,scope TEXT NOT NULL,acquired_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,dispatch_id TEXT);CREATE INDEX IF NOT EXISTS lease_registry.leases_worker ON leases(scope,worker)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize lease registry: %w", err)
 	}
 	return s, nil
 }
@@ -209,6 +237,9 @@ var migrations = []string{
  ALTER TABLE messages ADD COLUMN picked_up_at INTEGER;
  ALTER TABLE messages ADD COLUMN pickup_via TEXT NOT NULL DEFAULT '';
  ALTER TABLE messages ADD COLUMN delivery_error TEXT NOT NULL DEFAULT '';`,
+	// 9: optional per-run dispatch admission (host leases live in their registry).
+	`ALTER TABLE runs ADD COLUMN max_load REAL NOT NULL DEFAULT 0;
+ ALTER TABLE runs ADD COLUMN min_free_mem REAL NOT NULL DEFAULT 0;`,
 }
 
 func (s *Store) migrate() error {
