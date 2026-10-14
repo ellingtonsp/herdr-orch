@@ -252,19 +252,30 @@ horch sweep --dry-run       # inspect first; no signals or worker-state changes
 horch sweep                 # stop eligible orphan helpers
 ```
 
-Sweep defaults to no candidates. Only roots recorded in this daemon’s worker store for
-a released worker, or roots that no longer exist on disk, can authorize cleanup. A stopped
-worker with an existing worktree does not qualify. It protects worktrees reused by live or starting workers. It does not
-search arbitrary directories or remove worktrees. Home, parents of home, `/System`,
-`/Library`, `/usr`, `/Applications`, `~/Library` and parents of these system directories
-cannot authorize cleanup. Common container roots such as `/tmp`, `/private` and `/Volumes`
-are also denied. OS application/service executables remain protected even if they inherit
-a worktree cwd. Cwds in protected directories, symlink escapes, unknown ownership
-and other users are excluded. Release and hand-off enforce the same boundary; an unsafe
-recorded root refuses release before pane closure. Linux reads `/proc`; macOS uses `ps`
-and `lsof`. Cleanup needs permission to inspect and signal the current user's processes.
-Linux excludes nondumpable processes, different security credentials and greater capabilities;
-it does not attempt privileged cleanup.
+Sweep defaults to no candidates. Cleanup requires a root recorded in this daemon’s
+worker store for a released worker **and fresh proof that the exact root is a linked
+Git worktree**. Its Git directory must differ from the common Git directory, and Git’s
+administration backlink must identify that worktree. Main checkouts, non-Git directories,
+subdirectories and missing roots are skipped with `not a disposable worktree`; dry-run
+reports these roots separately from candidate processes. Horch currently opens existing
+worktrees and has no trusted creation-marker provenance, so a historical worker record
+alone never authorizes cleanup after a root disappears.
+
+A stopped worker with an existing worktree does not qualify. Live or starting worker
+scopes remain protected. Sweep does not search arbitrary directories or remove worktrees.
+Home, parents of home, `/System`, `/Library`, `/usr`, `/Applications`, `~/Library` and
+parents of these system directories cannot authorize cleanup. Common container roots
+such as `/tmp`, `/private` and `/Volumes` are also denied. OS application/service
+executables remain protected even if they inherit a worktree cwd. Cwds in protected
+directories, symlink escapes, unknown ownership and other users are excluded.
+Release and hand-off enforce the same boundary, including with `--force`; an unsafe or
+non-disposable recorded root refuses release before pane closure. Disposal proof and
+process scope are checked again before every signal. Legacy workers with no recorded
+worktree can still close their explicitly requested pane, but never run cwd cleanup or
+direct process signals. Linux reads `/proc`; macOS uses
+`ps` and `lsof`. Cleanup needs permission to inspect and signal the current user's
+processes. Linux excludes nondumpable processes, different security credentials and
+greater capabilities; it does not attempt privileged cleanup.
 Previously selected processes that leave scope are reported as skipped. Helpers that keep
 forking beyond the bounded release passes leave release incomplete for a later retry.
 

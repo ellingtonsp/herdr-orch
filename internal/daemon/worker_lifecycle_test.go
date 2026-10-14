@@ -292,13 +292,14 @@ func TestRestartEnvironmentAppliesLiteralValuesAndUnsets(t *testing.T) {
 
 func gitWorktree(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	cmd := exec.Command("git", "-C", dir, "init", "-q")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
+	_, linked := linkedFixture(t)
+	root, err := processRoot(linked)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return dir
+	return root
 }
+
 func TestWorkerHandOffReleasesDirtyHelperToLiveActualWorktree(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x, "w1:acme-helper", "w1:acme-owner")

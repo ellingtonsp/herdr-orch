@@ -225,9 +225,15 @@ func (e *Engine) cleanProcesses(ctx context.Context, root string, ps []ProcessRe
 type SweepArgs struct {
 	DryRun bool `json:"dry_run,omitempty"`
 }
+type SkippedWorktree struct {
+	Worktree string `json:"worktree"`
+	Reason   string `json:"reason"`
+}
+
 type SweepResult struct {
-	DryRun    bool             `json:"dry_run"`
-	Processes []ProcessOutcome `json:"processes"`
+	SkippedWorktrees []SkippedWorktree `json:"skipped_worktrees,omitempty"`
+	DryRun           bool              `json:"dry_run"`
+	Processes        []ProcessOutcome  `json:"processes"`
 }
 
 func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessage) (any, error) {
@@ -245,6 +251,8 @@ func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessa
 	if err != nil {
 		return nil, err
 	}
+	res := SweepResult{DryRun: a.DryRun, Processes: []ProcessOutcome{}}
+	skipped := map[string]bool{}
 	roots := map[string]bool{}
 	active := []string{}
 	for root, n := range e.starting {
@@ -273,15 +281,20 @@ func (e *Engine) opProcessSweep(ctx context.Context, _ string, raw json.RawMessa
 		if !removed && (w.State == store.WorkerLive || w.State == store.WorkerReleaseFailed) {
 			active = append(active, root)
 		}
-		scope, err := newCleanupScope(root)
-		if err != nil {
+		if w.State != store.WorkerReleased && !removed {
 			continue
 		}
-		if w.State == store.WorkerReleased || removed {
-			roots[scope.root] = roots[scope.root] || w.State == store.WorkerReleased
+		scope, err := newCleanupScope(root)
+		if err != nil {
+			if !skipped[root] {
+				res.SkippedWorktrees = append(res.SkippedWorktrees, SkippedWorktree{Worktree: root, Reason: err.Error()})
+				skipped[root] = true
+			}
+			continue
 		}
+		roots[scope.root] = roots[scope.root] || w.State == store.WorkerReleased
 	}
-	res := SweepResult{DryRun: a.DryRun, Processes: []ProcessOutcome{}}
+	sort.Slice(res.SkippedWorktrees, func(i, j int) bool { return res.SkippedWorktrees[i].Worktree < res.SkippedWorktrees[j].Worktree })
 	if len(roots) == 0 {
 		return res, nil
 	}

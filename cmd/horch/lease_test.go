@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ellingtonsp/herdr-orch/internal/client"
@@ -99,4 +100,30 @@ func startLeaseCLIDaemon(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go daemon.Serve(ctx, ln, e)
 	t.Cleanup(func() { cancel(); ln.Close(); st.Close(); os.Remove(c.Paths.Sock) })
+}
+
+func TestSweepCLIReportsNonDisposableRoot(t *testing.T) {
+	startLeaseCLIDaemon(t)
+	mustHorch(t, "human", "run", "create", "--title", "acme cleanup", "--json")
+	root := t.TempDir()
+	if err := cli.Call(context.Background(), "worker.register", daemon.WorkerRegisterArgs{Pane: "w1:old", Worktree: root}, nil); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cli.Paths.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetWorkerState("w1:old", store.WorkerReleased, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	out := mustHorch(t, "human", "sweep", "--dry-run")
+	if !strings.Contains(out, "0 process(es) considered") || !strings.Contains(out, "not a disposable worktree") || !strings.Contains(out, root) {
+		t.Fatalf("missing dry-run skip report: %s", out)
+	}
+	var result daemon.SweepResult
+	out = mustHorch(t, "human", "sweep", "--dry-run", "--json")
+	if err := json.Unmarshal([]byte(out), &result); err != nil || len(result.Processes) != 0 || len(result.SkippedWorktrees) != 1 || result.SkippedWorktrees[0].Reason != "not a disposable worktree" {
+		t.Fatalf("skip JSON: %s %v", out, err)
+	}
 }

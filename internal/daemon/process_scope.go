@@ -60,6 +60,9 @@ func newCleanupScope(path string) (cleanupScope, error) {
 			return cleanupScope{}, fmt.Errorf("protected path is not a cleanup worktree: %s", root)
 		}
 	}
+	if !linkedWorktree(root) {
+		return cleanupScope{}, fmt.Errorf("not a disposable worktree")
+	}
 	return cleanupScope{root: root}, nil
 }
 
@@ -67,14 +70,14 @@ func (s cleanupScope) contains(p ProcessRecord) bool {
 	if !p.UIDKnown || p.UID != os.Geteuid() || p.Started == "" || protectedExecutable(p.Command) {
 		return false
 	}
-	// Resolve again at every use, including directly before TERM and KILL.
-	// A replaced root symlink must not expand the previously approved scope.
-	current, err := newCleanupScope(s.root)
-	if err != nil || current.root != s.root {
-		return false
-	}
 	cwd, err := processRoot(p.Cwd)
 	if err != nil || cwd == "" || !insideWorktree(s.root, cwd) {
+		return false
+	}
+	// Resolve and prove disposal again at every use, including directly before
+	// TERM and KILL. A replaced root or lost Git metadata revokes authorization.
+	current, err := newCleanupScope(s.root)
+	if err != nil || current.root != s.root {
 		return false
 	}
 	home, protected, err := cleanupProtectedPaths()

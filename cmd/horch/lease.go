@@ -101,10 +101,7 @@ func printCloseResult(raw json.RawMessage) {
 	printProcessOutcomes(r.Processes)
 }
 func printSweepResult(raw json.RawMessage) {
-	var r struct {
-		DryRun    bool                    `json:"dry_run"`
-		Processes []daemon.ProcessOutcome `json:"processes"`
-	}
+	var r daemon.SweepResult
 	_ = json.Unmarshal(raw, &r)
 	if r.DryRun {
 		fmt.Printf("sweep dry run: %d process(es) considered\n", len(r.Processes))
@@ -112,4 +109,7 @@ func printSweepResult(raw json.RawMessage) {
 		fmt.Printf("sweep: %d process(es) considered\n", len(r.Processes))
 	}
 	printProcessOutcomes(r.Processes)
+	for _, skipped := range r.SkippedWorktrees {
+		fmt.Printf("skip worktree %s: %s\n", skipped.Worktree, skipped.Reason)
+	}
 }

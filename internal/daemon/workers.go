@@ -1063,6 +1063,13 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 			}
 		}
 	}
+	// Inspection and archiving may take time; disposal proof must still hold
+	// immediately before closing the pane as well as before explicit signals.
+	if root != "" {
+		if _, err := newCleanupScope(root); err != nil {
+			return res, refusal("unsafe_worktree", "%v", err)
+		}
+	}
 	closeErr := e.h.PaneClose(ctx, w.PaneID)
 	if closeErr != nil && herdr.ErrCode(closeErr) != "pane_not_found" {
 		scanErr = fmt.Errorf("pane close was not verified: %w", closeErr)

@@ -41,7 +41,7 @@ func TestSweepRejectsBroadRecordedHome(t *testing.T) {
 func TestSweepStoppedExistingRootIsNotReleased(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x)
-	root, _ := processRoot(t.TempDir())
+	root := gitWorktree(t)
 	x.st.RegisterWorker(store.Worker{PaneID: "w1:old", Worktree: root})
 	x.st.SetWorkerState("w1:old", store.WorkerStopped, "", "")
 	x.e.processes = &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}}}
@@ -64,7 +64,7 @@ func TestCleanupRejectsHomeScope(t *testing.T) {
 }
 
 func TestCleanupRejectsSymlinkEscape(t *testing.T) {
-	root, _ := processRoot(t.TempDir())
+	root := gitWorktree(t)
 	outside := t.TempDir()
 	link := filepath.Join(root, "escape")
 	if err := os.Symlink(outside, link); err != nil {
@@ -94,7 +94,7 @@ func TestSweepOnlyRecordedReleasedOrMissingWorktrees(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			x := newHarness(t)
 			setupRun(x)
-			root, _ := processRoot(t.TempDir())
+			root := gitWorktree(t)
 			home, _ := processRoot(t.TempDir())
 			t.Setenv("HOME", home)
 			unrelated, _ := processRoot(t.TempDir())
@@ -104,7 +104,7 @@ func TestSweepOnlyRecordedReleasedOrMissingWorktrees(t *testing.T) {
 					x.st.SetWorkerState("w1:old", store.WorkerReleased, "", "")
 				}
 				if mode == "missing" {
-					if err := os.Remove(root); err != nil {
+					if err := os.RemoveAll(root); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -124,7 +124,10 @@ func TestSweepOnlyRecordedReleasedOrMissingWorktrees(t *testing.T) {
 				var got SweepResult
 				x.mustOp(coord, "sweep", SweepArgs{DryRun: dry}, &got)
 				want := 0
-				if mode == "released" || mode == "missing" {
+				if mode == "missing" && (len(got.SkippedWorktrees) != 1 || got.SkippedWorktrees[0].Reason != "not a disposable worktree") {
+					t.Fatalf("missing root not reported: %+v", got)
+				}
+				if mode == "released" {
 					want = 1
 				}
 				if len(got.Processes) != want {
@@ -175,7 +178,7 @@ func TestReleaseUnsafeScopeNeverClosesPane(t *testing.T) {
 func TestCleanupRechecksOwnerAndScopeBeforeKill(t *testing.T) {
 	for _, mode := range []string{"other_user", "home", "system", "symlink"} {
 		t.Run(mode, func(t *testing.T) {
-			root, _ := processRoot(t.TempDir())
+			root := gitWorktree(t)
 			home, _ := processRoot(t.TempDir())
 			t.Setenv("HOME", home)
 			p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}
@@ -222,12 +225,9 @@ func TestSweepWithoutEligibleRootsDoesNotInspectHost(t *testing.T) {
 func TestUnsafeLiveRootStillProtectsReleasedChild(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x)
-	home, _ := processRoot(t.TempDir())
+	root := gitWorktree(t)
+	home := filepath.Dir(root)
 	t.Setenv("HOME", home)
-	root := filepath.Join(home, "acme")
-	if err := os.Mkdir(root, 0700); err != nil {
-		t.Fatal(err)
-	}
 	x.st.RegisterWorker(store.Worker{PaneID: "w1:live", Worktree: home})
 	x.st.RegisterWorker(store.Worker{PaneID: "w1:released", Worktree: root})
 	x.st.SetWorkerState("w1:released", store.WorkerReleased, "", "")
@@ -243,7 +243,7 @@ func TestUnsafeLiveRootStillProtectsReleasedChild(t *testing.T) {
 }
 
 func TestSystemExecutableInWorktreeIsExcluded(t *testing.T) {
-	root, _ := processRoot(t.TempDir())
+	root := gitWorktree(t)
 	for _, command := range []string{"/System/Library/CoreServices/MenuBarAgent", "/System/Library/CoreServices/WallpaperAgent", "/Library/acme/agent", "/Applications/acme/agent", "/usr/libexec/agent"} {
 		p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: command, Cwd: root}
 		f := &fakeProcesses{ps: []ProcessRecord{p}}
@@ -258,7 +258,7 @@ func TestSystemExecutableInWorktreeIsExcluded(t *testing.T) {
 func TestCleanupRechecksScopeBeforeTerm(t *testing.T) {
 	for _, mode := range []string{"owner", "cwd", "root_symlink"} {
 		t.Run(mode, func(t *testing.T) {
-			root, _ := processRoot(t.TempDir())
+			root := gitWorktree(t)
 			outside, _ := processRoot(t.TempDir())
 			p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}
 			f := &fakeProcesses{ps: []ProcessRecord{p}}
@@ -270,7 +270,7 @@ func TestCleanupRechecksScopeBeforeTerm(t *testing.T) {
 				case "cwd":
 					q.Cwd = outside
 				case "root_symlink":
-					if err := os.Remove(root); err != nil {
+					if err := os.RemoveAll(root); err != nil {
 						t.Fatal(err)
 					}
 					if err := os.Symlink(outside, root); err != nil {
@@ -288,26 +288,104 @@ func TestCleanupRechecksScopeBeforeTerm(t *testing.T) {
 	}
 }
 
-func TestSweepRechecksMissingRootBeforeTerm(t *testing.T) {
-	x := newHarness(t)
-	setupRun(x)
-	root, _ := processRoot(t.TempDir())
-	x.st.RegisterWorker(store.Worker{PaneID: "w1:old", Worktree: root})
-	if err := os.Remove(root); err != nil {
-		t.Fatal(err)
+func TestCleanupRechecksDisposableProofBeforeEachSignal(t *testing.T) {
+	for _, when := range []string{"term", "kill"} {
+		t.Run(when, func(t *testing.T) {
+			root := gitWorktree(t)
+			p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}
+			f := &fakeProcesses{ps: []ProcessRecord{p}}
+			f.inspect = func(int) (ProcessRecord, error) {
+				if when == "term" || len(f.signals) > 0 {
+					if err := os.Remove(filepath.Join(root, ".git")); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+				}
+				return p, nil
+			}
+			e := &Engine{processes: f, processGrace: time.Millisecond}
+			got := e.cleanProcesses(context.Background(), root, f.ps, false)
+			want := 0
+			if when == "kill" {
+				want = 1
+			}
+			if len(f.signals) != want || (want == 1 && f.signals[0] != syscall.SIGTERM) || len(got) != 1 || got[0].Action != "left_worktree" {
+				t.Fatalf("lost proof still signalled: %+v %+v", got, f.signals)
+			}
+		})
 	}
+}
+
+func TestReleaseRechecksDisposableProofBeforePaneClose(t *testing.T) {
+	x := newHarness(t)
+	setupRun(x, "w1:worker")
+	root := gitWorktree(t)
+	w, _ := x.st.GetWorker("w1:worker")
+	w.Worktree = root
+	x.st.RegisterWorker(w)
 	p := ProcessRecord{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}
 	f := &fakeProcesses{ps: []ProcessRecord{p}}
 	f.inspect = func(int) (ProcessRecord, error) {
-		if err := os.MkdirAll(root, 0700); err != nil {
+		if err := os.Remove(filepath.Join(root, ".git")); err != nil {
 			t.Fatal(err)
 		}
 		return p, nil
 	}
 	x.e.processes = f
-	var got SweepResult
-	x.mustOp(coord, "sweep", SweepArgs{}, &got)
-	if len(f.signals) != 0 {
-		t.Fatalf("recreated root authorized signals: %+v", f.signals)
+	x.h.pids[w.PaneID] = []int{p.PID}
+	_, err := x.op(coord, "worker.release", WorkerRef{Worker: w.PaneID, Force: true})
+	wantRefusal(t, err, "unsafe_worktree")
+	if len(x.h.closed) > 0 || len(f.signals) > 0 {
+		t.Fatal("lost proof allowed pane closure")
+	}
+}
+
+func TestOrdinaryRecordedRootsNeverAuthorizeCleanup(t *testing.T) {
+	main, linked := linkedFixture(t)
+	for _, tc := range []struct {
+		name, root string
+		want       int
+	}{
+		{"main checkout", main, 0}, {"non git", t.TempDir(), 0}, {"linked", linked, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newHarness(t)
+			setupRun(x)
+			root, _ := processRoot(tc.root)
+			x.st.RegisterWorker(store.Worker{PaneID: "w1:old", Worktree: root})
+			x.st.SetWorkerState("w1:old", store.WorkerReleased, "", "")
+			f := &fakeProcesses{ps: []ProcessRecord{{UID: os.Geteuid(), UIDKnown: true, PID: 100001, Started: "1", Command: "server", Cwd: root}}}
+			x.e.processes = f
+			var got SweepResult
+			x.mustOp(coord, "sweep", SweepArgs{DryRun: true}, &got)
+			if len(got.Processes) != tc.want || len(f.signals) != 0 {
+				t.Fatalf("ordinary root authorized cleanup: %+v", got)
+			}
+			if tc.want == 0 && (len(got.SkippedWorktrees) != 1 || got.SkippedWorktrees[0].Reason != "not a disposable worktree") {
+				t.Fatalf("missing skip reason: %+v", got)
+			}
+			if tc.want == 0 {
+				if outcomes, err := x.e.cleanProcessScope(context.Background(), root, f.ps, false); err == nil || len(outcomes) != 0 || len(f.signals) != 0 {
+					t.Fatalf("ordinary cleanup scope allowed: %+v %v", outcomes, err)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseOrdinaryRecordedRootRefusedEvenWithForce(t *testing.T) {
+	main, _ := linkedFixture(t)
+	for _, root := range []string{main, t.TempDir()} {
+		x := newHarness(t)
+		setupRun(x, "w1:worker")
+		w, _ := x.st.GetWorker("w1:worker")
+		w.Worktree = root
+		x.st.RegisterWorker(w)
+		f := &fakeProcesses{}
+		x.e.processes = f
+		_, err := x.op(coord, "worker.release", WorkerRef{Worker: w.PaneID, Force: true})
+		wantRefusal(t, err, "unsafe_worktree")
+		if len(x.h.closed) > 0 || len(f.signals) > 0 {
+			t.Fatal("ordinary project release mutated processes")
+		}
 	}
 }
