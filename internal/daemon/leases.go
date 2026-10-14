@@ -35,6 +35,9 @@ func (e *Engine) opLeaseAcquire(_ context.Context, _ string, raw json.RawMessage
 	if e.closing[w.PaneID] {
 		return nil, refusal("worker_closing", "worker %s is being released", w.PaneID)
 	}
+	if e.st.WorkerLifecycleHeld(w.PaneID) {
+		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
+	}
 	l, err := e.st.AcquireLease(a.Resource, w.PaneID, ttl)
 	if err == nil {
 		e.notify.broadcast()

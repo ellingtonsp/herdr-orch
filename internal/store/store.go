@@ -204,7 +204,18 @@ var migrations = []string{
 	`CREATE TRIGGER plan_events_no_replace BEFORE INSERT ON plan_events
 		WHEN EXISTS(SELECT 1 FROM plan_events WHERE seq=NEW.seq)
 		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
-	// 5: persistent named leases and optional per-run dispatch admission.
+	// 5: durable dispatch holds and usage-cap deduplication.
+	`ALTER TABLE dispatches ADD COLUMN hold_until INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN hold_event TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN hold_reason TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN held_by TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN monitor_after INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN usage_cap_notice TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN usage_cap_until INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN usage_cap_unknown INTEGER NOT NULL DEFAULT 0;`,
+	// 6: worker launch configuration, restart holds and hand-off receipts.
+	WorkerLifecycleMigration,
+	// 7: optional per-run dispatch admission (host leases live in their registry).
 	`ALTER TABLE runs ADD COLUMN max_load REAL NOT NULL DEFAULT 0;
  ALTER TABLE runs ADD COLUMN min_free_mem REAL NOT NULL DEFAULT 0;`,
 }

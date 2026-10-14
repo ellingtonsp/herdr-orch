@@ -66,13 +66,16 @@ func expireLeases(q querier, now int64) error {
 	return err
 }
 func leaseWorker(q querier, pane string) error {
-	var state string
-	err := q.QueryRow(`SELECT state FROM workers WHERE pane_id=?`, pane).Scan(&state)
+	var state, phase string
+	err := q.QueryRow(`SELECT state,lifecycle FROM workers WHERE pane_id=?`, pane).Scan(&state, &phase)
 	if err == sql.ErrNoRows {
 		return refuse("unknown_worker", "pane %s is not a registered worker", pane)
 	}
 	if err != nil {
 		return err
+	}
+	if phase != "" {
+		return refuse("worker_lifecycle_busy", "worker %s is held for a lifecycle operation", pane)
 	}
 	if state != WorkerLive {
 		return refuse("worker_not_live", "worker %s is %s", pane, state)
@@ -188,9 +191,36 @@ func (s *Store) ReleaseLease(resource, pane string) error {
 
 // ReleaseWorkerWithLeases must only be called after process release is verified.
 // Persist the released state and free resources together, never on a failed close.
-func (s *Store) ReleaseWorkerWithLeases(pane, note, archive string) error {
+func (s *Store) ReleaseWorkerWithLeases(pane, note, archive string, handOffTo ...string) error {
+	if len(handOffTo) > 1 {
+		return refuse("bad_args", "at most one lease hand-off recipient is allowed")
+	}
+	target := ""
+	if len(handOffTo) == 1 {
+		target = handOffTo[0]
+	}
+	if target == pane {
+		return refuse("bad_args", "worker cannot hand leases to itself")
+	}
 	return s.tx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE workers SET state=?,note=COALESCE(?,note),archive_path=COALESCE(?,archive_path),released_at=? WHERE pane_id=?`, WorkerReleased, nullStr(note), nullStr(archive), s.now(), pane)
+		name := ""
+		if target != "" {
+			var state, phase string
+			err := tx.QueryRow(`SELECT COALESCE(name,''),state,lifecycle FROM workers WHERE pane_id=?`, target).Scan(&name, &state, &phase)
+			if err == sql.ErrNoRows {
+				return refuse("unknown_worker", "hand-off recipient %s is not registered", target)
+			}
+			if err != nil {
+				return err
+			}
+			if state != WorkerLive {
+				return refuse("worker_not_live", "hand-off recipient %s is %s", target, state)
+			}
+			if phase != "" && phase != "receiving_hand_off" {
+				return refuse("worker_lifecycle_busy", "hand-off recipient %s is held for %s", target, phase)
+			}
+		}
+		res, err := tx.Exec(`UPDATE workers SET state=?,note=COALESCE(?,note),archive_path=COALESCE(?,archive_path),released_at=?,lifecycle='' WHERE pane_id=?`, WorkerReleased, nullStr(note), nullStr(archive), s.now(), pane)
 		if err != nil {
 			return err
 		}
@@ -201,7 +231,16 @@ func (s *Store) ReleaseWorkerWithLeases(pane, note, archive string) error {
 		if n != 1 {
 			return refuse("unknown_worker", "pane %s is not a registered worker", pane)
 		}
-		_, err = tx.Exec(`DELETE FROM lease_registry.leases WHERE worker=? AND scope=?`, pane, s.leaseScope)
+		if target != "" {
+			// A pane's verified hand-off directory may differ from its earlier
+			// registration. Persist responsibility before a later sweep or release.
+			if _, err = tx.Exec(`UPDATE workers SET worktree=(SELECT hand_off_worktree FROM workers WHERE pane_id=?) WHERE pane_id=? AND EXISTS (SELECT 1 FROM workers WHERE pane_id=? AND hand_off_to=? AND COALESCE(hand_off_worktree,'')<>'')`, pane, target, pane, target); err != nil {
+				return err
+			}
+			_, err = tx.Exec(`UPDATE lease_registry.leases SET worker=?,holder_name=?,dispatch_id=NULL WHERE worker=? AND scope=?`, target, name, pane, s.leaseScope)
+		} else {
+			_, err = tx.Exec(`DELETE FROM lease_registry.leases WHERE worker=? AND scope=?`, pane, s.leaseScope)
+		}
 		return err
 	})
 }

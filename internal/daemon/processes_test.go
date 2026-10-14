@@ -505,3 +505,62 @@ func TestPaneInspectionFailureNeverClosesOrFreesLease(t *testing.T) {
 		t.Fatalf("unsafe close: closed=%v signals=%v leases=%v", x.h.closed, f.signals, leases)
 	}
 }
+
+func TestHandOffKeepsRecipientHelpersAndTransfersLease(t *testing.T) {
+	x := newHarness(t)
+	setupRun(x, "w1:helper", "w1:owner")
+	root := gitWorktree(t)
+	root, _ = processRoot(root)
+	for _, pane := range []string{"w1:helper", "w1:owner"} {
+		x.h.panes[pane].Cwd = &root
+		w, _ := x.st.GetWorker(pane)
+		w.Worktree = root
+		x.st.RegisterWorker(w)
+	}
+	// Registration can predate the recipient moving into the actual worktree.
+	owner, _ := x.st.GetWorker("w1:owner")
+	owner.Worktree = t.TempDir()
+	x.st.RegisterWorker(owner)
+	lease, err := x.st.AcquireLease("db:acme", "w1:helper", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.h.pids["w1:helper"] = []int{100001}
+	x.h.pids["w1:owner"] = []int{100002}
+	x.h.killOnClose = false
+	f := &fakeProcesses{ps: []ProcessRecord{{PID: 100001, Started: "1", Cwd: root, Command: "helper"}, {PID: 100002, Started: "2", Cwd: root, Command: "owner"}, {PID: 100003, Started: "3", Cwd: root, Command: "database"}}}
+	x.e.processes = f
+	x.e.processGrace = time.Millisecond
+	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:helper", HandOffTo: "w1:owner"}, nil)
+	if len(f.signalled) != 2 || f.signalled[0] != 100001 || f.signalled[1] != 100001 || len(f.ps) != 2 {
+		t.Fatalf("hand-off killed shared helpers: %+v %+v", f.signalled, f.ps)
+	}
+	leases, err := x.st.ListLeases()
+	if err != nil || len(leases) != 1 || leases[0].Worker != "w1:owner" || leases[0].ExpiresAt != lease.ExpiresAt {
+		t.Fatalf("hand-off lease %+v %v", leases, err)
+	}
+	owner, _ = x.st.GetWorker("w1:owner")
+	if owner.Worktree != root {
+		t.Fatalf("recipient responsibility not reconciled: %+v", owner)
+	}
+	x.mustOp(coord, "sweep", SweepArgs{}, nil)
+	if len(f.ps) != 2 || len(f.signalled) != 2 {
+		t.Fatalf("sweep killed handed-off helpers: %+v %+v", f.signalled, f.ps)
+	}
+	x.mustOp(coord, "worker.release", WorkerRef{Worker: "w1:owner"}, nil)
+	if len(f.ps) != 0 {
+		t.Fatalf("recipient release left helpers: %+v", f.ps)
+	}
+}
+func TestRestartRetainsResourceLease(t *testing.T) {
+	x, _, w, _, _ := restartHarness(t)
+	lease, err := x.st.AcquireLease("sim:device-1", w.PaneID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.mustOp(coord, "worker.restart", WorkerRestartArgs{Worker: w.PaneID}, nil)
+	leases, err := x.st.ListLeases()
+	if err != nil || len(leases) != 1 || leases[0].Worker != w.PaneID || leases[0].ExpiresAt != lease.ExpiresAt {
+		t.Fatalf("restart lease %+v %v", leases, err)
+	}
+}

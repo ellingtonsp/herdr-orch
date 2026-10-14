@@ -263,3 +263,135 @@ func TestAdmissionSettingsValidationAndAtomicUpdate(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestVerifiedHandoffTransfersLeasesAndClearsLifecycle(t *testing.T) {
+	s := open(t)
+	r := must[Run](t)(s.CreateRun("run", ""))
+	for _, w := range []Worker{{PaneID: "w1:source", Name: "source", RunID: r.ID}, {PaneID: "w1:target", Name: "recipient", RunID: r.ID}} {
+		must[Worker](t)(s.RegisterWorker(w))
+	}
+	task := must[Task](t)(s.CreateTask(r.ID, "task", "", nil))
+	must[Dispatch](t)(s.BeginDispatchWithLeases(task.ID, "w1:source", "", "", []string{"sim:device-1", "db:test"}, time.Hour))
+	before := must[[]Lease](t)(s.ListLeases())
+	if err := s.BeginWorkerLifecycle("w1:source", "releasing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginWorkerLifecycle("w1:target", "receiving_hand_off"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseWorkerWithLeases("w1:source", "verified", "", "w1:target"); err != nil {
+		t.Fatal(err)
+	}
+	after := must[[]Lease](t)(s.ListLeases())
+	if len(after) != len(before) {
+		t.Fatal(after)
+	}
+	for i, l := range after {
+		if l.Worker != "w1:target" || l.HolderName != "recipient" || l.ExpiresAt != before[i].ExpiresAt || l.AcquiredAt != before[i].AcquiredAt || l.DispatchID != "" || l.Scope != before[i].Scope {
+			t.Fatalf("handoff altered lease contract: %+v -> %+v", before[i], l)
+		}
+	}
+	source := must[Worker](t)(s.GetWorker("w1:source"))
+	if source.State != WorkerReleased || source.Lifecycle != "" {
+		t.Fatal(source)
+	}
+	target := must[Worker](t)(s.GetWorker("w1:target"))
+	if target.State != WorkerLive || target.Lifecycle != "receiving_hand_off" {
+		t.Fatalf("recipient lifecycle changed: %+v", target)
+	}
+	if err := s.ReleaseLease("sim:device-1", "w1:target"); err != nil {
+		t.Fatalf("explicit release blocked during lifecycle: %v", err)
+	}
+}
+
+func TestLeaseHandoffFailureRollsBackRelease(t *testing.T) {
+	s := open(t)
+	for _, p := range []string{"w1:source", "w1:target"} {
+		must[Worker](t)(s.RegisterWorker(Worker{PaneID: p}))
+	}
+	must[Lease](t)(s.AcquireLease("port:7171", "w1:source", time.Hour))
+	if err := s.BeginWorkerLifecycle("w1:source", "releasing"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER lease_registry.fail_transfer BEFORE UPDATE ON leases BEGIN SELECT RAISE(ABORT,'test failure');END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseWorkerWithLeases("w1:source", "verified", "", "w1:target"); err == nil {
+		t.Fatal("reported success on registry error")
+	}
+	source := must[Worker](t)(s.GetWorker("w1:source"))
+	if source.State != WorkerLive || source.Lifecycle != "releasing" {
+		t.Fatalf("partial release: %+v", source)
+	}
+	if leases := must[[]Lease](t)(s.ListLeases()); len(leases) != 1 || leases[0].Worker != "w1:source" {
+		t.Fatalf("partial handoff: %+v", leases)
+	}
+}
+
+func TestLifecycleHoldsBlockClaimsButPermitLeaseRelease(t *testing.T) {
+	for _, phase := range []string{"releasing", "restart", "receiving_hand_off", "restart_failed"} {
+		t.Run(phase, func(t *testing.T) {
+			s := open(t)
+			r := must[Run](t)(s.CreateRun("run", ""))
+			must[Worker](t)(s.RegisterWorker(Worker{PaneID: "w1:worker"}))
+			must[Lease](t)(s.AcquireLease("port:7171", "w1:worker", time.Hour))
+			if err := s.SetWorkerLifecycle("w1:worker", phase); err != nil {
+				t.Fatal(err)
+			}
+			_, err := s.AcquireLease("db:new", "w1:worker", time.Hour)
+			refusal(t, err, "worker_lifecycle_busy")
+			task := must[Task](t)(s.CreateTask(r.ID, "task", "", nil))
+			_, err = s.BeginDispatchWithLeases(task.ID, "w1:worker", "", "", []string{"db:new"}, time.Hour)
+			refusal(t, err, "worker_lifecycle_busy")
+			_, err = s.BeginDispatch(task.ID, "w1:worker", "", "")
+			refusal(t, err, "worker_lifecycle_busy")
+			if err := s.ReleaseLease("port:7171", "w1:worker"); err != nil {
+				t.Fatal(err)
+			}
+			got := must[Task](t)(s.GetTask(task.ID))
+			if got.Status != TaskReady || got.Attempts != 0 {
+				t.Fatal(got)
+			}
+		})
+	}
+}
+
+func TestNormalVerifiedReleaseClearsLifecycleAndLeases(t *testing.T) {
+	s := open(t)
+	must[Worker](t)(s.RegisterWorker(Worker{PaneID: "w1:worker"}))
+	must[Lease](t)(s.AcquireLease("db:test", "w1:worker", time.Hour))
+	if err := s.BeginWorkerLifecycle("w1:worker", "releasing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseWorkerWithLeases("w1:worker", "verified", ""); err != nil {
+		t.Fatal(err)
+	}
+	got := must[Worker](t)(s.GetWorker("w1:worker"))
+	if got.State != WorkerReleased || got.Lifecycle != "" {
+		t.Fatal(got)
+	}
+	if ls := must[[]Lease](t)(s.ListLeases()); len(ls) != 0 {
+		t.Fatal(ls)
+	}
+}
+
+func TestRestartReplacementPreservesOriginalLeaseUntilRelease(t *testing.T) {
+	s := open(t)
+	r := must[Run](t)(s.CreateRun("run", ""))
+	must[Worker](t)(s.RegisterWorker(Worker{PaneID: "w1:worker"}))
+	task := must[Task](t)(s.CreateTask(r.ID, "task", "", nil))
+	old := must[Dispatch](t)(s.BeginDispatchWithLeases(task.ID, "w1:worker", "", "", []string{"db:test"}, time.Hour))
+	if err := s.MarkSent(old.ID, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	before := must[[]Lease](t)(s.ListLeases())
+	if err := s.BeginWorkerLifecycle("w1:worker", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	next := must[Dispatch](t)(s.ReplaceWorkerDispatch(old.ID))
+	must[Settlement](t)(s.FenceUnsent(next.ID, "replacement rejected"))
+	after := must[[]Lease](t)(s.ListLeases())
+	if len(after) != 1 || after[0].Worker != "w1:worker" || after[0].ExpiresAt != before[0].ExpiresAt {
+		t.Fatalf("restart rejection freed old responsibility: %+v", after)
+	}
+}

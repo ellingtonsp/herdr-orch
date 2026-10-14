@@ -70,6 +70,27 @@ A dispatch settles only when **both** hold:
   `horch task update --id tN --reset-attempts --status ready`.
 - `horch dispatch show --task tN` shows live status and flags state/report mismatches.
 
+## Dispatch holds and usage caps
+
+```bash
+horch dispatch hold --task tN --until 30m --reason "Waiting for review"
+horch dispatch hold --task tN --until 2026-12-01T13:00:00Z --reason "Reset time"
+horch dispatch hold --task tN --until event:review-complete --reason "Owner will resume"
+horch dispatch resume --task tN
+horch dispatch fail --task tN --infra --reason "Account unavailable"
+```
+
+Holds persist across daemon restarts and suppress idle, blocked and no-activity reminders.
+Timed holds expire automatically. Named events are descriptive: explicitly resume the task
+when the condition happens. Completion reports still settle normally. Resume gives a fresh
+grace period and does not itself send a prompt.
+
+Usage-cap notices in inactive panes produce one escalation and an automatic hold until the
+parsed reset. Clock resets use the daemon timezone unless the notice specifies an IANA zone.
+Unknown/ambiguous resets hold for `event:usage-reset` until explicit resume. The same visible
+notice does not repeat after resume. A cap outlasting an earlier coordinator hold remains held.
+`dispatch fail --infra` refunds the attempt; ordinary failure still counts toward max-attempts.
+
 ## Worker side
 
 The dispatch prompt tells the worker exactly what to run. As a worker:
@@ -89,6 +110,8 @@ horch worker start --agent codex --pane w4:p1 --name n1-1 -- --model ID  # exist
                                               # must have a workspace and an available shell
 horch worker register --pane w1:p4            # adopt an agent pane you already have
 horch worker list | show | read --worker N [--lines 200]
+horch worker restart --worker N --unset API_KEY --env PROFILE=alternate
+horch worker release --worker helper --hand-off-to owner  # same actual worktree, recorded transfer
 horch worker release --worker N               # archive transcript, close pane, verify every process is gone
 horch worker stop --worker N                  # fence its dispatch (attempt not counted) + close
 horch worker abandon --worker N               # fence and stop supervising; pane left open
@@ -100,6 +123,19 @@ remote (`unsaved_work`) and escalate instead; `--force` overrides. Release never
 success while a process from the pane is alive (it escalates to SIGTERM/SIGKILL and reports
 `release_failed` otherwise). A worker stuck at a startup prompt (folder trust) is escalated;
 horch never answers such prompts.
+
+Restart requests a clean exit, proves the shell is available, applies and verifies repeatable
+`--env KEY=VAL`/`--unset KEY` edits, then reuses the saved agent arguments and re-dispatches the
+same task without another attempt. Supported agents: claude, codex and pi. Adopted/older workers
+without saved launch arguments refuse restart. Failure or interruption keeps the task claimed;
+inspect and retry restart or explicitly stop/abandon. A successful restart clears dispatch holds.
+Environment edits are sourced from a private temporary script and verified in the pane shell;
+values are not printed or stored in the database.
+
+Hand-off requires a live recipient in the same actual git worktree, records who accepted the
+files, and bypasses only the unsaved-work refusal. Active dispatch and process-exit checks still
+apply. `--hand-off-to` cannot be combined with `--force`. Interrupted releases need explicit retry.
+
 
 ## Resource leases and admission
 
@@ -116,7 +152,8 @@ horch sweep                                            # stop them
 
 Leases are shared across sessions using the same plugin state root. A conflict names
 its holder; dispatch reserves all requested leases before delivery. Renew with acquire
-as the same worker before TTL expires. Successful worker release frees leases; failed
+as the same worker before TTL expires. Successful worker release frees leases; hand-off
+transfers them to the recipient with unchanged expiry, and restart retains them. Failed
 cleanup, stop and task completion retain them. Leases are cooperative: always give tools
 the explicit leased device/port/database. Limits check one-minute load and available or
 reclaimable memory on macOS/Linux; a refusal leaves work ready for a later attempt.
@@ -124,7 +161,7 @@ reclaimable memory on macOS/Linux; a refusal leaves work ready for a later attem
 Release discovers detached processes by cwd inside the registered worktree, rechecks
 identity/scope before TERM then KILL, and reports outcomes. It excludes outside processes,
 `herdr*`/`horch*`, the daemon and its ancestors. Shared live/starting worktrees refuse
-cleanup. Inventory errors and survivors keep release incomplete and retain leases.
+ordinary cleanup. Explicit hand-off closes only the source pane and preserves shared helpers. Inventory errors and survivors keep release incomplete and retain leases.
 Sweep only considers recorded released/stopped or missing worktrees; live reused scopes
 are protected. Dry-run sends no signals. Neither command removes worktrees.
 
@@ -213,4 +250,5 @@ push/ready warnings; inferred workflow timing is labelled as a possible race.
 `worker start --worktree DIR` finds/opens that worktree's workspace and reuses an available
 shell or creates a shell tab. It skips widgets and busy panes. `--cwd DIR` keeps the existing
 caller-workspace behavior. Do not combine `--worktree` with `--cwd` or `--pane`. A pane with
-no workspace is an error; choose a shell in a workspace.
+no workspace is an error; choose a shell in a workspace. Worktree-selected workers retain
+their launch arguments for `worker restart`, which reuses the current pane.

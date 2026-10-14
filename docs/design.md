@@ -18,7 +18,7 @@ plugin, built on what herdr already does well: it knows each agent's real lifecy
    background jobs are indistinguishable from "forgot to report", so the decision belongs to
    the coordinator (`dispatch nudge`, `dispatch fail`).
 3. **Fail only on positive evidence:** the worker's own `--failed`, its pane closing or exiting,
-   a stop, or the coordinator's `dispatch fail`. Each counts toward a per-task circuit breaker.
+   a stop, or the coordinator's `dispatch fail`. Task failures count toward a per-task circuit breaker; infrastructure fencing refunds its attempt.
 4. **Never claim a release that left a process alive.** Release records the pane's process ids,
    closes the pane, waits, escalates to SIGTERM then SIGKILL, and reports `release_failed` with
    the survivors otherwise. It refuses when the worktree has uncommitted or unpushed work.
@@ -84,7 +84,8 @@ or dispatch IDs from different sessions cannot steal or free each other's resour
 A dispatch claims its task and all requested leases in one serialized transaction before
 prompt submission. An explicit pre-delivery rejection releases only newly acquired
 leases; uncertain delivery retains them until release or expiry. Successful worker
-release updates its state and removes its leases together. The session database uses WAL:
+release updates its state and removes its leases together; hand-off instead transfers them
+to the reserved recipient with unchanged expiry. Restart keeps its resource reservations. The session database uses WAL:
 a crash during a multi-database commit can leave a conservative unsent claim or lease;
 TTL bounds that stale reservation. No prompt is sent until commit returns successfully.
 
@@ -92,6 +93,29 @@ Run admission samples host load and available memory immediately before claiming
 new dispatch. Zero limits preserve existing behavior. Refusals leave ready tasks for
 manual or later automatic retry. Enabled checks fail closed if OS metrics are unavailable.
 These limits do not measure per-worker consumption or enforce a running-worker quota.
+## Dispatch and worker lifecycle
+
+Dispatch holds store a deadline or named event, reason and actor. Named event holds require
+explicit resume. Timed expiry resets supervision grace. Holds suppress idle, blocked and
+unobserved escalation, while completion can still settle. Usage-cap recognition is restricted
+to standalone notices from inactive panes; the cap signature, reset, automatic hold and
+coordinator escalation are committed in one transaction. A cap deferred by an earlier manual
+hold survives that hold's expiry. Missing reset evidence means an explicit-resume event hold.
+
+Workers persist launch arguments separately from public worker JSON. Lifecycle reservations
+prevent status settlement, new dispatches and competing worker operations during restart or
+hand-off. Restart proves shell availability before environment mutation and requires a unique
+acknowledgment before launch. The replacement dispatch is created transactionally while the
+task remains claimed, keeping attempts unchanged. Interrupted restart remains held for explicit
+recovery. Interrupted teardown requires another explicit operation; it cannot silently skip
+unsaved-work validation after a crash.
+
+Release hand-off reserves both workers, verifies their live pane directories resolve to the
+same git worktree, and persists a responsibility receipt before teardown. It bypasses only the
+unsaved-work check; active-dispatch and source-pane process cleanup rules are retained.
+Worktree-wide termination is disabled for hand-off so the recipient and shared helpers
+remain running. After source cleanup succeeds, leases move to the recipient and its recorded
+worktree is reconciled to the verified shared root, protecting helpers from later sweeps.
 
 ## Day plans
 

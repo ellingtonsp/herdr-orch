@@ -8,9 +8,20 @@
   or removed worktrees while excluding reused live scopes.
 - **Resource leases.** `horch lease acquire|release|list`, optional `--ttl`, and repeatable
   dispatch `--lease` reserve named simulator, port and database resources across sessions.
-  Successful worker release frees leases; conflicts name the holder.
+  Successful worker release frees leases; hand-off transfers them with unchanged expiry,
+  restart retains them, and conflicts name the holder.
 - **Admission control.** `horch run update --max-load N --min-free-mem PCT` adds optional
   macOS/Linux capacity checks before manual or automatic dispatch, with explicit refusals.
+- **Lifecycle integration.** Worktree-selected workers retain saved launch arguments for
+  restart; PR watching and dispatch holds remain available together.
+- **Dispatch lifecycle:** `dispatch hold --until <RFC3339|duration|event:name> --reason ...`
+  and `dispatch resume` persist intentional waits. Usage-cap screens raise one escalation
+  and auto-hold until reset (explicit resume when unknown). `dispatch fail --infra` refunds
+  the interrupted attempt.
+- **Worker recovery:** `worker restart --worker W [--env KEY=VAL] [--unset KEY]` verifies clean
+  agent exit and shell environment before relaunching with saved arguments and re-dispatching
+  the same task without another attempt. `worker release --hand-off-to W` records a transfer
+  to a live owner in the same worktree, allowing unsaved helper work without `--force`.
 - **Native PR watch.** `horch pr watch <n> [--until green|merged] [--repo owner/name]`
   reports required CI, queue removals and merges to the coordinator inbox, selects latest
   same-head workflow attempts, warns about push/ready races, and supports per-project

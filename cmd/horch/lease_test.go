@@ -61,6 +61,8 @@ func TestLeaseCLIAndAdmissionFlags(t *testing.T) {
 
 type leaseCLIHerdr struct{ nopHerdr }
 
+func (leaseCLIHerdr) PaneRead(context.Context, string, int) (string, error) { return "", nil }
+
 func (leaseCLIHerdr) PaneGet(_ context.Context, id string) (herdr.Pane, error) {
 	return herdr.Pane{PaneID: id, AgentStatus: "idle"}, nil
 }
