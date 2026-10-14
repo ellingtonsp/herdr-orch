@@ -104,6 +104,7 @@ func (f *fakeHerdr) ProcessInfo(_ context.Context, id string) (herdr.ProcessInfo
 	for i, p := range f.pids[id] {
 		if i == 0 {
 			pi.ShellPID = p
+			pi.ForegroundProcessGroupID = p
 		} else {
 			pi.ForegroundProcesses = append(pi.ForegroundProcesses, struct {
 				PID  int    `json:"pid"`
@@ -136,6 +137,11 @@ func (f *fakeHerdr) NewTab(_ context.Context, ws, cwd, label string, _ map[strin
 	f.mu.Unlock()
 	f.addPane(id, "", "unknown", false)
 	return herdr.Pane{PaneID: id, WorkspaceID: "w1"}, nil
+}
+
+func (f *fakeHerdr) WorktreePane(ctx context.Context, cwd, label string, env map[string]string) (herdr.Pane, bool, error) {
+	p, err := f.NewTab(ctx, "w2", cwd, label, env)
+	return p, true, err
 }
 
 func (f *fakeHerdr) AgentStart(_ context.Context, name, kind, pane string, _ []string) (herdr.Pane, error) {
@@ -896,6 +902,7 @@ func TestWorkerStartInExistingPane(t *testing.T) {
 	cwd := "/tmp/wt-x"
 	x.h.panes["w2:p1"].Cwd = &cwd
 	x.h.panes["w2:p1"].Agent = nil
+	x.h.pids["w2:p1"] = []int{2_000_000_000}
 	var w store.Worker
 	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "codex", Name: "it-codex", Pane: "w2:p1"}, &w)
 	if w.PaneID != "w2:p1" || w.Worktree != cwd || x.h.nextPane != 0 {
@@ -910,6 +917,7 @@ func TestWorkerStartSurvivesHerdrStartTimeout(t *testing.T) {
 	setupRun(x)
 	x.h.addPane("w2:p1", "", "unknown", false)
 	x.h.panes["w2:p1"].Agent = nil
+	x.h.pids["w2:p1"] = []int{2_000_000_000}
 	x.h.startTimeout = true
 	var w store.Worker
 	x.mustOp(coord, "worker.start", WorkerStartArgs{Agent: "claude", Name: "h1r-1", Pane: "w2:p1"}, &w)
