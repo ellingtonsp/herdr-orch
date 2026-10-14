@@ -30,6 +30,11 @@ type WorkerStartArgs struct {
 	// Worktree finds or opens the checkout's own workspace and selects a shell there.
 	Worktree string   `json:"worktree,omitempty"`
 	Args     []string `json:"args,omitempty"`
+	// Account and Profile record launch labels; agent-specific selection flags go
+	// in Args. Model is the requested launch model, never effective-model proof.
+	Account string `json:"account,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Model   string `json:"model,omitempty"`
 	// Pane starts the agent in an existing shell pane (e.g. the root pane of a workspace
 	// made by `herdr worktree create`) instead of opening a new tab.
 	Pane string `json:"pane,omitempty"`
@@ -53,6 +58,19 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	defer e.processMu.Unlock()
 	if a.Agent == "" {
 		return store.Worker{}, refusal("bad_args", "--agent is required (claude|pi|codex|...)")
+	}
+	// Retain supplied launch arguments verbatim. An explicit requested model is
+	// added only when no model was already supplied to the agent.
+	if supplied := launchArg(a.Args, "--model", "-m"); supplied != "" {
+		a.Model = supplied
+	} else if a.Model != "" {
+		a.Args = append(append([]string(nil), a.Args...), "--model", a.Model)
+	}
+	if a.Account == "" {
+		a.Account = launchArg(a.Args, "--account")
+	}
+	if a.Profile == "" {
+		a.Profile = launchArg(a.Args, "--profile")
 	}
 	run, err := e.runFor(caller, a.Run)
 	if err != nil {
@@ -224,7 +242,7 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, AgentArgs: a.Args, LaunchKnown: true})
+	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, AgentArgs: a.Args, LaunchKnown: true, Account: a.Account, Profile: a.Profile, Model: a.Model})
 	if err != nil {
 		return w, err
 	}
@@ -536,7 +554,7 @@ func (e *Engine) opWorkerRestart(ctx context.Context, caller string, raw json.Ra
 		return nil, refusal("restart_unsupported", "no clean exit command is known for agent %s", w.Agent)
 	}
 	sameRegistration := func(current store.Worker) bool {
-		return current.PaneID == w.PaneID && current.RunID == w.RunID && current.Worktree == w.Worktree && current.Name == w.Name && current.State == w.State && current.StartedAt == w.StartedAt && current.Agent == w.Agent && current.LaunchKnown == w.LaunchKnown && slices.Equal(current.AgentArgs, w.AgentArgs)
+		return current.PaneID == w.PaneID && current.RunID == w.RunID && current.Worktree == w.Worktree && current.Name == w.Name && current.State == w.State && current.StartedAt == w.StartedAt && current.Agent == w.Agent && current.Account == w.Account && current.Profile == w.Profile && current.Model == w.Model && current.LaunchKnown == w.LaunchKnown && slices.Equal(current.AgentArgs, w.AgentArgs)
 	}
 	e.mu.Lock()
 	current, currentErr := e.st.GetWorker(w.PaneID)

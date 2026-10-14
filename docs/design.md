@@ -24,7 +24,8 @@ plugin, built on what herdr already does well: it knows each agent's real lifecy
    the survivors otherwise. It refuses when the worktree has uncommitted or unpushed work.
 5. **Escalate, don't guess.** Blocked prompts, startup dialogs, prompts that never landed and
    worktrees removed under a live worker all go to the coordinator (and, where urgent, a herdr
-   notification). horch never answers an agent's dialog or re-sends a prompt on its own.
+   notification). horch never answers an agent's dialog. Mailbox delivery retries once
+   with the same message ID; dispatch settlement still never blindly re-dispatches work.
 
 ## Architecture
 
@@ -56,11 +57,12 @@ agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► d
 | Table | Holds |
 |---|---|
 | `runs` | title, coordinator pane, status, auto-dispatch, max attempts, idle-report and idle-flag delays, load and memory admission limits |
-| `messages` | from, to, kind (`note, question, reply, done, escalation`), task, reply-to, read state |
+| `messages` | from, to, kind (`note, question, reply, done, escalation`), task, reply-to, read state, delivery/pickup receipts |
+| `dispatch_reports` | immutable report-to-dispatch associations, including late notes |
 | `tasks` | spec, deps, status, assignee, attempts, result |
 | `dispatches` | task, pane, status, observed activity, done report, idle/unobserved escalation flags, nudges, outcome |
 | `gates` | task, question, options, decision, timeout |
-| `workers` | pane, run, agent, worktree, state (`live, released, stopped, abandoned, exited, release_failed`), retained |
+| `workers` | pane, run, agent, launch account/profile/model, worktree, state (`live, released, stopped, abandoned, exited, release_failed`), retained |
 | `schedules`, `schedule_runs` | cron spec, action, history |
 
 Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
@@ -205,3 +207,11 @@ an owner change applies without a restart. `horch config` shows the file and wha
 | Release with unsaved work | Lost changes | Refuse on uncommitted or unpushed work; `--force` is explicit |
 | A stale plan editor | Overwrites a newer change | `--if-version` / `--if-plan-version` refuse stale writes |
 | A pane claims to be the owner | A false approval | Local trust only (orch.sock is 0600, same user); a web UI should set the principal from the viewer's authenticated identity (e.g. a VPN or SSO header), never from the request body |
+
+## Mailbox reliability
+
+[Messaging](messaging.md) specifies receipt evidence, bounded retries, consumer leases and
+late reports. Receipt state is durable; per-connection mailbox leases and per-pane delivery
+serialization are daemon-local. Restart resumes only jobs with no submission attempt and
+escalates uncertain writes. Completion report association and message insertion are atomic;
+late notes preserve settlement. Dispatches snapshot launch metadata for historical accuracy.

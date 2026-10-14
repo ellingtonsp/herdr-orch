@@ -215,7 +215,29 @@ var migrations = []string{
  ALTER TABLE dispatches ADD COLUMN usage_cap_unknown INTEGER NOT NULL DEFAULT 0;`,
 	// 6: worker launch configuration, restart holds and hand-off receipts.
 	WorkerLifecycleMigration,
-	// 7: optional per-run dispatch admission (host leases live in their registry).
+	// 7: requested worker launch metadata and durable dispatch report history.
+	`ALTER TABLE workers ADD COLUMN account TEXT;
+	ALTER TABLE workers ADD COLUMN profile TEXT;
+	ALTER TABLE workers ADD COLUMN model TEXT;
+	ALTER TABLE dispatches ADD COLUMN account TEXT;
+	ALTER TABLE dispatches ADD COLUMN profile TEXT;
+	ALTER TABLE dispatches ADD COLUMN model TEXT;
+	CREATE TABLE dispatch_reports(
+		dispatch_id TEXT NOT NULL REFERENCES dispatches(id),
+		message_id TEXT PRIMARY KEY REFERENCES messages(id),
+		late INTEGER NOT NULL DEFAULT 0);
+	INSERT INTO dispatch_reports(dispatch_id,message_id,late)
+		SELECT id,done_message_id,0 FROM dispatches
+		WHERE done_message_id IN (SELECT id FROM messages);
+	CREATE INDEX dispatch_reports_dispatch ON dispatch_reports(dispatch_id);`,
+	// 8: durable terminal delivery and pickup evidence, separate from mailbox reads.
+	`ALTER TABLE messages ADD COLUMN delivery_status TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE messages ADD COLUMN delivered_at INTEGER;
+ ALTER TABLE messages ADD COLUMN picked_up_at INTEGER;
+ ALTER TABLE messages ADD COLUMN pickup_via TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN delivery_error TEXT NOT NULL DEFAULT '';`,
+	// 9: optional per-run dispatch admission (host leases live in their registry).
 	`ALTER TABLE runs ADD COLUMN max_load REAL NOT NULL DEFAULT 0;
  ALTER TABLE runs ADD COLUMN min_free_mem REAL NOT NULL DEFAULT 0;`,
 }

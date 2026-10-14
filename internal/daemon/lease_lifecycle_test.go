@@ -29,6 +29,15 @@ func TestDispatchHoldAndInfraFailureRetainLeases(t *testing.T) {
 	if err != nil || len(after) != 1 || after[0].Worker != before[0].Worker || after[0].ExpiresAt != before[0].ExpiresAt {
 		t.Fatalf("infra failure freed or renewed leases: %+v %v", after, err)
 	}
+	var report store.CompletionReport
+	x.mustOp("w1:worker", "send", SendArgs{Kind: store.KindDone, Task: task.ID, Body: "late test evidence"}, &report)
+	if !report.Late {
+		t.Fatal("expected a late report for fenced dispatch")
+	}
+	late, err := x.st.ListLeases()
+	if err != nil || len(late) != 1 || late[0] != after[0] || x.task(task.ID).Attempts != 0 {
+		t.Fatalf("late completion changed retained responsibility: %+v %v", late, err)
+	}
 	_, err = x.op(coord, "dispatch", DispatchArgs{Task: task.ID, To: "w1:other", Leases: []string{"sim:device-1"}})
 	wantRefusal(t, err, "lease_held")
 	if x.h.promptCount("w1:other") != 0 || x.task(task.ID).Attempts != 0 {

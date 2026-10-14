@@ -31,6 +31,7 @@ func (e *Engine) Ops() map[string]Handler {
 		"run.update":      e.opRunUpdate,
 		"send":            e.opSend,
 		"check":           e.opCheck,
+		"ack":             e.opAck,
 		"ask":             e.opAsk,
 		"reply":           e.opReply,
 		"inbox":           e.opInbox,
@@ -267,13 +268,15 @@ func (e *Engine) opRunUpdate(_ context.Context, caller string, raw json.RawMessa
 // ---------- messages ----------
 
 type SendArgs struct {
-	Run     string `json:"run,omitempty"`
-	To      string `json:"to"`
-	Subject string `json:"subject,omitempty"`
-	Body    string `json:"body,omitempty"`
-	Kind    string `json:"kind,omitempty"`
-	Task    string `json:"task,omitempty"`
-	Failed  bool   `json:"failed,omitempty"`
+	WaitPickup bool   `json:"wait_pickup,omitempty"`
+	TimeoutMS  int64  `json:"timeout_ms,omitempty"`
+	Run        string `json:"run,omitempty"`
+	To         string `json:"to"`
+	Subject    string `json:"subject,omitempty"`
+	Body       string `json:"body,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Task       string `json:"task,omitempty"`
+	Failed     bool   `json:"failed,omitempty"`
 }
 
 // resolveRecipients maps --to to pane ids: coordinator | run | human | horch | <pane> |
@@ -339,16 +342,19 @@ func (e *Engine) opSend(ctx context.Context, caller string, raw json.RawMessage)
 	if err != nil {
 		return nil, err
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	var out []store.Message
 	for _, r := range to {
-		m, err := e.st.InsertMessage(store.Message{RunID: run.ID, From: caller, To: r, Subject: a.Subject, Body: a.Body, Kind: a.Kind, TaskID: a.Task})
+		e.mu.Lock()
+		m, err := e.st.InsertMessage(store.Message{RunID: run.ID, From: caller, To: r, Subject: a.Subject, Body: a.Body, Kind: a.Kind, TaskID: a.Task, DeliveryStatus: "queued"})
+		if err == nil {
+			e.badgeMail(r)
+		}
+		e.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, m)
-		e.badgeMail(r)
+		e.startDelivery(m)
 		if a.Kind == store.KindEscalation {
 			e.async(func() {
 				ctx, cancel := bg()
@@ -358,11 +364,14 @@ func (e *Engine) opSend(ctx context.Context, caller string, raw json.RawMessage)
 		}
 	}
 	e.notify.broadcast()
+	if a.WaitPickup {
+		return e.waitPickup(ctx, out, time.Duration(a.TimeoutMS)*time.Millisecond)
+	}
 	return out, nil
 }
 
-// done records a worker's completion report against its active dispatch. The message goes
-// to the daemon; the coordinator hears about it once the dispatch settles.
+// done records a worker's report against the latest dispatch of an explicit task,
+// or its active dispatch. Reports after settlement become notes without reopening it.
 func (e *Engine) done(caller string, a SendArgs) (any, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -373,18 +382,10 @@ func (e *Engine) done(caller string, a SendArgs) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		found := false
-		for _, x := range ds {
-			if x.Active() {
-				d, found = x, true
-			}
+		if len(ds) == 0 {
+			return nil, refusal("no_active_dispatch", "task %s has no dispatch", a.Task)
 		}
-		if !found {
-			return nil, refusal("no_active_dispatch", "task %s has no active dispatch", a.Task)
-		}
-		if isPane(caller) && d.PaneID != caller {
-			return nil, refusal("not_assignee", "task %s is dispatched to %s, not %s", a.Task, d.PaneID, caller)
-		}
+		d = ds[len(ds)-1]
 	} else {
 		d, err = e.st.ActiveDispatchForPane(caller)
 		if err != nil {
@@ -394,31 +395,37 @@ func (e *Engine) done(caller string, a SendArgs) (any, error) {
 	if e.st.WorkerLifecycleHeld(d.PaneID) {
 		return nil, refusal("worker_lifecycle_busy", "worker is held for a lifecycle operation")
 	}
-	if d.DoneMessageID != "" {
-		return nil, refusal("already_done", "dispatch %s already has a done report (%s)", d.ID, d.DoneMessageID)
-	}
 	outcome := "succeeded"
 	if a.Failed {
 		outcome = "failed"
 	}
-	m, err := e.st.InsertMessage(store.Message{RunID: d.RunID, From: caller, To: store.Daemon, Subject: a.Subject, Body: a.Body, Kind: store.KindDone, TaskID: d.TaskID, Outcome: outcome})
+	report, err := e.st.RecordDispatchReport(d.ID, store.Message{From: caller, Subject: a.Subject, Body: a.Body, Outcome: outcome})
 	if err != nil {
 		return nil, err
 	}
-	d, err = e.st.RecordDone(d.ID, m.ID, outcome)
-	if err != nil {
-		return nil, err
+	if report.Late {
+		body := fmt.Sprintf("Late report from %s for task %s (dispatch %s, already %s; outcome: %s). Reported outcome: %s. The existing settlement is unchanged.", caller, d.TaskID, d.ID, d.Status, d.Outcome, outcome)
+		body += dispatchWorkerMetadata(d)
+		if a.Subject != "" {
+			body += "\n\n" + a.Subject
+		}
+		if a.Body != "" {
+			body += "\n\n" + a.Body
+		}
+		e.messageCoordinatorLocked(d.RunID, store.KindNote, "late report for task "+d.TaskID, body, d.TaskID, "")
+	} else {
+		e.evaluateLocked(report.Dispatch)
 	}
-	e.evaluateLocked(d)
 	e.notify.broadcast()
-	d, _ = e.st.GetDispatch(d.ID)
-	return map[string]any{"message": m, "dispatch": d}, nil
+	report.Dispatch, _ = e.st.GetDispatch(d.ID)
+	return report, nil
 }
 
 type CheckArgs struct {
-	Wait      bool  `json:"wait,omitempty"`
-	TimeoutMS int64 `json:"timeout_ms,omitempty"`
-	Peek      bool  `json:"peek,omitempty"`
+	Wait      bool   `json:"wait,omitempty"`
+	TimeoutMS int64  `json:"timeout_ms,omitempty"`
+	Peek      bool   `json:"peek,omitempty"`
+	Consumer  string `json:"consumer,omitempty"`
 }
 
 func (e *Engine) opCheck(ctx context.Context, caller string, raw json.RawMessage) (any, error) {
@@ -426,17 +433,30 @@ func (e *Engine) opCheck(ctx context.Context, caller string, raw json.RawMessage
 	if err != nil {
 		return nil, err
 	}
+	if !a.Peek {
+		release, err := e.acquireConsumer(ctx, caller, a.Consumer, "check")
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	deadline := time.After(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	for {
 		wake := e.notify.wait()
 		e.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return nil, err
+		}
 		msgs, err := e.st.Unread([]string{caller}, !a.Peek)
 		if err == nil && len(msgs) > 0 && !a.Peek {
 			e.badgeMail(caller)
+			e.notify.broadcast()
 		}
 		e.mu.Unlock()
 		if err != nil {
@@ -447,7 +467,7 @@ func (e *Engine) opCheck(ctx context.Context, caller string, raw json.RawMessage
 		}
 		select {
 		case <-wake:
-		case <-deadline:
+		case <-timer.C:
 			return []store.Message{}, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -549,18 +569,22 @@ func (e *Engine) opReply(_ context.Context, caller string, raw json.RawMessage) 
 		return nil, err
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	q, err := e.st.GetMessage(a.ID)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, err
 	}
 	if q.Kind != store.KindQuestion {
+		e.mu.Unlock()
 		return nil, refusal("not_a_question", "message %s is a %s, not a question", a.ID, q.Kind)
 	}
-	m, err := e.st.InsertMessage(store.Message{RunID: q.RunID, From: caller, To: q.From, Kind: store.KindReply, Subject: "re: question", Body: a.Body, ReplyTo: q.ID, TaskID: q.TaskID})
+	m, err := e.st.InsertMessage(store.Message{RunID: q.RunID, From: caller, To: q.From, Kind: store.KindReply, Subject: "re: question", Body: a.Body, ReplyTo: q.ID, TaskID: q.TaskID, DeliveryStatus: "queued"})
 	if err != nil {
+		e.mu.Unlock()
 		return nil, err
 	}
+	e.mu.Unlock()
+	e.startDelivery(m)
 	e.badgeMail(q.From)
 	e.notify.broadcast()
 	return m, nil
@@ -923,8 +947,9 @@ type DispatchShowArgs struct {
 
 type DispatchView struct {
 	store.Dispatch
-	LiveStatus string `json:"live_status,omitempty"`
-	Mismatch   string `json:"mismatch,omitempty"`
+	Reports    []store.Message `json:"reports,omitempty"`
+	LiveStatus string          `json:"live_status,omitempty"`
+	Mismatch   string          `json:"mismatch,omitempty"`
 }
 
 func (e *Engine) opDispatchShow(_ context.Context, _ string, raw json.RawMessage) (any, error) {
@@ -949,6 +974,10 @@ func (e *Engine) opDispatchShow(_ context.Context, _ string, raw json.RawMessage
 	out := []DispatchView{}
 	for _, d := range ds {
 		v := DispatchView{Dispatch: d}
+		v.Reports, err = e.st.DispatchReports(d.ID)
+		if err != nil {
+			return nil, err
+		}
 		if d.Active() {
 			v.LiveStatus = e.status[d.PaneID]
 			switch {

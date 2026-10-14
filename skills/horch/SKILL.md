@@ -61,7 +61,8 @@ A dispatch settles only when **both** hold:
   background jobs look exactly like this. Decide on your next tick:
   `horch dispatch nudge --task tN` (asks it to report or say what it is waiting on; refused
   while it is working) or `horch dispatch fail --task tN --reason "..."` (counts the attempt).
-  A late `horch done` always settles normally.
+  A report while the dispatch remains open settles normally. After it closes,
+  `done --task tN` appends a late note without changing the existing settlement.
 - No activity at all for 90s → one escalation ("prompt may not have landed"). horch never
   re-sends a prompt on its own; check the pane first.
 - Pane closed or exited → `failed: pane_closed|pane_exited`.
@@ -228,6 +229,36 @@ Status values match Orca's, so Orca-based skills port with renames: runs `idle|r
 
 horch does not create or delete worktrees: use `herdr worktree create` (or git) and pass the path
 or the new workspace's pane to `horch worker start`.
+
+## Message receipts and mailbox ownership
+
+- `horch send --to NAME --body B --wait-pickup [--timeout 5m]` waits for receipt evidence.
+  Plain send returns after durable queuing; pane delivery runs in the background.
+- Delivery waits for an interactive idle agent (up to 2m per attempt), then observes pickup
+  for 10s. It retries once, submitting an existing collapsed paste with Enter when detected,
+  and escalates `undelivered` to the coordinator if pickup remains unconfirmed. Worker
+  lifecycle reservations block input; restart activity does not count as message pickup.
+- `horch inbox [--all] [--json]` shows queued/submitting/delivered/picked_up/undelivered,
+  attempts and timestamps. A working transition is inferred pickup, not a mailbox read.
+  `--wait-pickup` defaults to 4m25s; its timeout does not cancel background delivery.
+- A reply read by a still-running `ask` needs no pane input. Human messages use the mailbox.
+- Keep one destructive `check --wait` consumer per mailbox. A second check or ack gets
+  `mailbox_busy`, naming the command and hostname/PID holder. The lease ends on return,
+  timeout or disconnect. `check --peek` (also with `--wait`) is non-destructive.
+- `horch ack --id mN` idempotently acknowledges a message addressed to your identity.
+  Use peek then ack when processing must precede acknowledgement.
+- `horch done --task tN` after closure appends a late note to the latest dispatch and informs
+  the coordinator. It does not reopen the task or overwrite its result. Dispatch show JSON
+  includes the report history. Only the assignee can report.
+- `worker start --account LABEL --profile LABEL --model ID` records launch metadata.
+  Account/profile are labels; agent-specific selection flags belong after `--`. The model
+  flag is passed to the agent unless launch args already supply one. Supplied launch args
+  (`--account`, `--profile`, `--model`/`-m`) are also recorded. Completion notifications use
+  the dispatch's metadata snapshot, including across restart replacements. Hand-offs preserve
+  both worker identities. These are requested values, not verified runtime identity.
+
+If delivery times out or the daemon restarts mid-submission, inspect inbox and the pane
+before manually resending. An uncertain submission may already have reached the agent.
 
 ## Watch PR CI
 

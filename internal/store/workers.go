@@ -18,6 +18,9 @@ type Worker struct {
 	RunID           string   `json:"run_id,omitempty"`
 	Name            string   `json:"name,omitempty"`
 	Agent           string   `json:"agent,omitempty"`
+	Account         string   `json:"account,omitempty"`
+	Profile         string   `json:"profile,omitempty"`
+	Model           string   `json:"model,omitempty"`
 	Worktree        string   `json:"worktree,omitempty"`
 	State           string   `json:"state"`
 	Retained        bool     `json:"retained"`
@@ -34,12 +37,12 @@ type Worker struct {
 	HandOffWorktree string   `json:"hand_off_worktree,omitempty"`
 }
 
-const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,retained,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,''),agent_args,lifecycle,COALESCE(hand_off_to,''),COALESCE(hand_off_at,0),COALESCE(hand_off_worktree,'')`
+const workerCols = `pane_id,COALESCE(run_id,''),COALESCE(name,''),COALESCE(agent,''),COALESCE(worktree,''),state,retained,COALESCE(flagged_at,0),started_at,COALESCE(released_at,0),COALESCE(archive_path,''),COALESCE(note,''),agent_args,lifecycle,COALESCE(hand_off_to,''),COALESCE(hand_off_at,0),COALESCE(hand_off_worktree,''),COALESCE(account,''),COALESCE(profile,''),COALESCE(model,'')`
 
 func scanWorker(r interface{ Scan(...any) error }) (Worker, error) {
 	var w Worker
 	var args sql.NullString
-	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.Retained, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note, &args, &w.Lifecycle, &w.HandOffTo, &w.HandOffAt, &w.HandOffWorktree)
+	err := r.Scan(&w.PaneID, &w.RunID, &w.Name, &w.Agent, &w.Worktree, &w.State, &w.Retained, &w.FlaggedAt, &w.StartedAt, &w.ReleasedAt, &w.ArchivePath, &w.Note, &args, &w.Lifecycle, &w.HandOffTo, &w.HandOffAt, &w.HandOffWorktree, &w.Account, &w.Profile, &w.Model)
 	if err == nil && args.Valid {
 		w.LaunchKnown = true
 		err = json.Unmarshal([]byte(args.String), &w.AgentArgs)
@@ -62,11 +65,11 @@ func (s *Store) RegisterWorker(w Worker) (Worker, error) {
 		}
 		args = string(b)
 	}
-	res, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,agent_args) VALUES(?,?,?,?,?,?,?,?)
+	res, err := s.db.Exec(`INSERT INTO workers(pane_id,run_id,name,agent,worktree,state,started_at,agent_args,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(pane_id) DO UPDATE SET run_id=excluded.run_id, name=excluded.name, agent=excluded.agent,
 		worktree=excluded.worktree, state=excluded.state, released_at=NULL, flagged_at=NULL,
-		agent_args=excluded.agent_args WHERE workers.lifecycle=''`,
-		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now, args)
+		agent_args=excluded.agent_args, account=excluded.account, profile=excluded.profile, model=excluded.model WHERE workers.lifecycle=''`,
+		w.PaneID, nullStr(w.RunID), nullStr(w.Name), nullStr(w.Agent), nullStr(w.Worktree), WorkerLive, now, args, nullStr(w.Account), nullStr(w.Profile), nullStr(w.Model))
 	if err != nil {
 		return Worker{}, err
 	}
@@ -212,7 +215,7 @@ func (s *Store) ReplaceWorkerDispatch(oldID string) (Dispatch, error) {
 		if _, err := tx.Exec(`UPDATE dispatches SET status=?,settled_at=?,outcome='fenced: worker restart' WHERE id=?`, DispatchFailed, now, oldID); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at) VALUES(?,?,?,?,?,?,?,?)`, id, d.TaskID, d.RunID, d.PaneID, nullStr(d.Agent), nullStr(d.PromptHash), DispatchPending, now)
+		_, err = tx.Exec(`INSERT INTO dispatches(id,task_id,run_id,pane_id,agent,prompt_hash,status,started_at,account,profile,model) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, d.TaskID, d.RunID, d.PaneID, nullStr(d.Agent), nullStr(d.PromptHash), DispatchPending, now, nullStr(d.Account), nullStr(d.Profile), nullStr(d.Model))
 		return err
 	})
 	if err != nil {

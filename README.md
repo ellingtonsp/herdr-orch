@@ -39,7 +39,8 @@ Running several agents in parallel breaks down in the same few places:
 
 ## Features
 
-- **Mailbox:** `send`, `check [--wait]`, blocking `ask` / `reply`, an inbox per pane, broadcast to a run.
+- **Mailbox:** readiness-aware `send [--wait-pickup]` and replies, delivery/pickup receipts,
+  one consuming `check --wait` per mailbox, `check --peek`, explicit `ack --id`, and run broadcasts.
 - **Tasks:** dependencies (`--deps a,b`) with automatic readiness, cycle detection, a circuit
   breaker after N failed attempts, optional auto-dispatch to idle workers.
 - **Tracked dispatch:** the task spec is wrapped with the exact `horch done` command the worker must
@@ -199,6 +200,23 @@ reuses an available shell there, or creates a shell tab. Widget and busy panes a
 `--pane` requires an available shell with a workspace; a null workspace produces a clear
 error. `--cwd` retains the old behavior of creating a tab in the caller workspace.
 
+## Reliable messages
+
+`horch send --to worker-a --body "Review the updated tests." --wait-pickup` waits for
+confirmed pickup. Sends and replies wait for an interactive idle agent, preserve long
+prompts through the agent paste transport, retry once, and escalate unconfirmed delivery.
+`horch inbox` shows delivery and pickup status; `--json` includes timestamps and attempt counts.
+
+Keep one consuming `horch check --wait` loop per mailbox. A second consumer is refused
+with the holder's identity. Use `horch check --peek` for inspection and `horch ack --id m12`
+to acknowledge a specific message. Peek never consumes messages.
+
+A late `horch done --task t12 --body "Additional result"` is retained as a note attached to
+the latest closed dispatch, without changing its settlement. Worker launch account/profile
+labels and requested model are recorded and included in completion notifications.
+See [message delivery and acknowledgement](docs/messaging.md) for timing, retry behavior,
+receipt meanings, launch metadata flags and restart semantics.
+
 ## How settlement works
 
 | Situation | What horch does |
@@ -260,7 +278,7 @@ port numbers are normalized. Acquisition is exclusive and a refusal names the ho
 and session. Dispatch reserves all required resources together before delivering the
 prompt. Existing reservations belonging to that worker are retained. Successful worker
 release frees its leases; explicit hand-off transfers them to the recipient with the same
-expiry. Restart retains them. Failed cleanup, stop, abandon and completed tasks do not.
+expiry. Restart, failed cleanup, stop, abandon and task completion retain leases.
 An expired lease can be acquired by another worker, so choose a TTL covering the work
 or renew it before expiry. These are cooperative reservations: tools must still target
 the declared device, port or database explicitly.
@@ -272,6 +290,7 @@ exceeds `--max-load` or available memory is below `--min-free-mem` percent. Linu
 Unreadable metrics fail closed when limits are enabled. These checks also apply to
 `dispatch next` and automatic dispatch; tasks stay ready for a later attempt. Limits
 are sampled at admission and do not pause running workers or reserve CPU/memory.
+
 ## Holds, usage caps and worker recovery
 
 ```bash
@@ -322,7 +341,8 @@ a helper to leave uncommitted or unpushed work for its owner without `--force`. 
 still block release, and the normal process-exit verification still applies. Responsibility
 transfer does not commit, push or delete files. The recipient is reserved during hand-off.
 Only source-pane processes are closed and verified; shared helpers stay with the recipient.
-Leases transfer atomically after successful source cleanup, preserving their expiry.
+Leases transfer atomically after successful source cleanup, preserving their expiry. The
+recipient’s registered worktree is updated to the verified shared root for later cleanup.
 
 ## Configuration
 
