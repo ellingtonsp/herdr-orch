@@ -7,11 +7,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func (h nativeProcesses) List(ctx context.Context) ([]ProcessRecord, error) {
 	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	selfStatus, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return nil, err
+	}
+	caller, err := parseProcessCredentials(string(selfStatus))
 	if err != nil {
 		return nil, err
 	}
@@ -24,14 +31,18 @@ func (h nativeProcesses) List(ctx context.Context) ([]ProcessRecord, error) {
 		if err != nil {
 			continue
 		}
-		st, err := os.Stat(filepath.Join("/proc", entry.Name()))
+		status, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if st.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+		target, err := parseProcessCredentials(string(status))
+		if err != nil {
+			return nil, err
+		}
+		if !inspectableCredentials(target, caller) {
 			continue
 		}
 		p, err := h.Inspect(ctx, pid)
@@ -39,7 +50,7 @@ func (h nativeProcesses) List(ctx context.Context) ([]ProcessRecord, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w (uid=%v gid=%v permitted=%x effective=%x)", err, target.UIDs, target.GIDs, target.Permitted, target.Effective)
 		}
 		out = append(out, p)
 	}
@@ -83,6 +94,15 @@ func (nativeProcesses) Inspect(ctx context.Context, pid int) (ProcessRecord, err
 func processFieldError(dir, field string, err error) error {
 	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
 		return os.ErrNotExist
+	}
+	if b, e := os.ReadFile(filepath.Join(dir, "stat")); e == nil {
+		end := strings.LastIndexByte(string(b), ')')
+		if end >= 0 {
+			f := strings.Fields(string(b[end+1:]))
+			if len(f) > 0 && (f[0] == "Z" || f[0] == "X") {
+				return os.ErrNotExist
+			}
+		}
 	}
 	return fmt.Errorf("cannot inspect process %s: %v", field, err)
 }

@@ -225,6 +225,8 @@ Sweep considers only worktrees recorded by this daemon that were released/stoppe
 no longer exist. It protects worktrees reused by live or starting workers. It does not
 search arbitrary directories or remove worktrees. Linux reads `/proc`; macOS uses `ps`
 and `lsof`. Cleanup needs permission to inspect and signal the current user's processes.
+Linux excludes processes with different security credentials or greater capabilities;
+it does not attempt privileged cleanup.
 A protected or relocated process is explicitly reported as skipped. Helpers that keep
 forking beyond the bounded release passes leave release incomplete for a later retry.
 

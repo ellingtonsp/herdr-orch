@@ -488,3 +488,20 @@ func TestStartExistingPaneRejectsMismatchedCwd(t *testing.T) {
 		t.Fatal("started agent in unverified cwd")
 	}
 }
+
+func TestPaneInspectionFailureNeverClosesOrFreesLease(t *testing.T) {
+	x := newHarness(t)
+	setupRun(x, "w1:p2")
+	if _, err := x.st.AcquireLease("port:3000", "w1:p2", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	x.h.processInfoErr = errors.New("transport unavailable")
+	f := &fakeProcesses{}
+	x.e.processes = f
+	_, err := x.op(coord, "worker.release", WorkerRef{Worker: "w1:p2"})
+	wantRefusal(t, err, "process_scan_failed")
+	leases, _ := x.st.ListLeases()
+	if len(x.h.closed) != 0 || len(f.signals) != 0 || len(leases) != 1 {
+		t.Fatalf("unsafe close: closed=%v signals=%v leases=%v", x.h.closed, f.signals, leases)
+	}
+}

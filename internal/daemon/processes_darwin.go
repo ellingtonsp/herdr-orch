@@ -65,6 +65,17 @@ func darwinProcesses(ctx context.Context, pid int) ([]ProcessRecord, error) {
 			p.Cwd = cwd
 			out = append(out, p)
 		} else {
+			if pid == 0 {
+				fresh, inspectErr := darwinProcesses(ctx, p.PID)
+				if os.IsNotExist(inspectErr) {
+					continue
+				}
+				if inspectErr != nil {
+					return nil, inspectErr
+				}
+				out = append(out, fresh...)
+				continue
+			}
 			// A process can exit between ps and lsof. Only a confirmed exit permits
 			// omitting it; unreadable cwd is an incomplete inventory.
 			check := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(p.PID), "-o", "stat=")

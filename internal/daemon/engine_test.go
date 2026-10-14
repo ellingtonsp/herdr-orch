@@ -18,18 +18,19 @@ import (
 
 // fakeHerdr records calls and serves canned pane state.
 type fakeHerdr struct {
-	mu           sync.Mutex
-	panes        map[string]*herdr.Pane
-	prompts      map[string][]string
-	typed        map[string][]string
-	notes        []string
-	closed       []string
-	pids         map[string][]int
-	named        map[string]bool // panes herdr manages (agent.prompt works)
-	nextPane     int
-	notReady     map[string]int // named panes that refuse prompts this many more times
-	startTimeout bool           // AgentStart reports herdr's timeout but the agent comes up anyway
-	killOnClose  bool
+	processInfoErr error
+	mu             sync.Mutex
+	panes          map[string]*herdr.Pane
+	prompts        map[string][]string
+	typed          map[string][]string
+	notes          []string
+	closed         []string
+	pids           map[string][]int
+	named          map[string]bool // panes herdr manages (agent.prompt works)
+	nextPane       int
+	notReady       map[string]int // named panes that refuse prompts this many more times
+	startTimeout   bool           // AgentStart reports herdr's timeout but the agent comes up anyway
+	killOnClose    bool
 }
 
 func newFake() *fakeHerdr {
@@ -97,6 +98,9 @@ func (f *fakeHerdr) PaneTokens(context.Context, string, map[string]*string) erro
 func (f *fakeHerdr) ProcessInfo(_ context.Context, id string) (herdr.ProcessInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.processInfoErr != nil {
+		return herdr.ProcessInfo{}, f.processInfoErr
+	}
 	if _, ok := f.panes[id]; !ok {
 		return herdr.ProcessInfo{}, &herdr.Error{Code: "pane_not_found", Message: id}
 	}

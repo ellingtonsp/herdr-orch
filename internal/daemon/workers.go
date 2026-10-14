@@ -541,6 +541,9 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 		return res, refusal("process_scan_failed", "cannot inspect worktree processes: %v", scanErr)
 	}
 	info, infoErr := e.h.ProcessInfo(ctx, w.PaneID)
+	if infoErr != nil && herdr.ErrCode(infoErr) != "pane_not_found" {
+		return res, refusal("process_scan_failed", "cannot inspect pane before closing: %v", infoErr)
+	}
 	paneProcesses := map[int]ProcessRecord{}
 	if infoErr == nil {
 		res.PIDs = info.PIDs()
@@ -564,9 +567,6 @@ func (e *Engine) closeWorker(ctx context.Context, w store.Worker, final string, 
 	closeErr := e.h.PaneClose(ctx, w.PaneID)
 	if closeErr != nil && herdr.ErrCode(closeErr) != "pane_not_found" {
 		scanErr = fmt.Errorf("pane close was not verified: %w", closeErr)
-	}
-	if infoErr != nil && herdr.ErrCode(infoErr) != "pane_not_found" {
-		scanErr = fmt.Errorf("pane inventory was not verified: %w", infoErr)
 	}
 	if root != "" {
 		// Include helpers forked between the first inventory and pane closure.
