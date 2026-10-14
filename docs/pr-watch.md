@@ -13,6 +13,18 @@ current repository through `gh repo view`. The caller's current run is pinned at
 Ctrl-C stops the watcher. Restarting begins a new observation session and can repeat a
 notification; no persistent watch registration is created.
 
+## Waiting with dispatch holds
+
+When a dispatched worker is waiting on CI, suppress supervision reminders with:
+
+```sh
+horch dispatch hold --task t1 --until event:ci-green --reason "Waiting on CI"
+```
+
+The foreground watcher continues to report to the coordinator. The event name is descriptive: a `ci green` inbox
+message does not automatically release the hold. Use `dispatch resume --task t1` when the
+wait is over. A worker's `done` report can still settle a held dispatch.
+
 ## CI selection
 
 Each poll reads the PR head and base, effective branch rules, workflow runs, check runs,

@@ -18,7 +18,7 @@ plugin, built on what herdr already does well: it knows each agent's real lifecy
    background jobs are indistinguishable from "forgot to report", so the decision belongs to
    the coordinator (`dispatch nudge`, `dispatch fail`).
 3. **Fail only on positive evidence:** the worker's own `--failed`, its pane closing or exiting,
-   a stop, or the coordinator's `dispatch fail`. Each counts toward a per-task circuit breaker.
+   a stop, or the coordinator's `dispatch fail`. Task failures count toward a per-task circuit breaker; infrastructure fencing refunds its attempt.
 4. **Never claim a release that left a process alive.** Release records the pane's process ids,
    closes the pane, waits, escalates to SIGTERM then SIGKILL, and reports `release_failed` with
    the survivors otherwise. It refuses when the worktree has uncommitted or unpushed work.
@@ -66,6 +66,27 @@ agents ──► horch ──► $STATE/sessions/<session>/orch.sock ──► d
 | `schedules`, `schedule_runs` | cron spec, action, history |
 
 Ids are short and typeable (`r1`, `t7`, `d9`, `m42`, `g1`, `s1`).
+
+## Dispatch and worker lifecycle
+
+Dispatch holds store a deadline or named event, reason and actor. Named event holds require
+explicit resume. Timed expiry resets supervision grace. Holds suppress idle, blocked and
+unobserved escalation, while completion can still settle. Usage-cap recognition is restricted
+to standalone notices from inactive panes; the cap signature, reset, automatic hold and
+coordinator escalation are committed in one transaction. A cap deferred by an earlier manual
+hold survives that hold's expiry. Missing reset evidence means an explicit-resume event hold.
+
+Workers persist launch arguments separately from public worker JSON. Lifecycle reservations
+prevent status settlement, new dispatches and competing worker operations during restart or
+hand-off. Restart proves shell availability before environment mutation and requires a unique
+acknowledgment before launch. The replacement dispatch is created transactionally while the
+task remains claimed, keeping attempts unchanged. Interrupted restart remains held for explicit
+recovery. Interrupted teardown requires another explicit operation; it cannot silently skip
+unsaved-work validation after a crash.
+
+Release hand-off reserves both workers, verifies their live pane directories resolve to the
+same git worktree, and persists a responsibility receipt before teardown. It bypasses only the
+unsaved-work check; active-dispatch and process cleanup rules are retained.
 
 ## Day plans
 

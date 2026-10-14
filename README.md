@@ -183,7 +183,8 @@ Repository: <path>   Base branch: <main>   Max parallel workers: <2>
    `horch task update --id <id> --status ready --spec-file <feedback>` and dispatch it again to
    the same worker.
 7. On "idle without reporting": read the screen tail in the message. `horch dispatch nudge` once.
-   If it happens again, `horch dispatch fail` and decide whether to retry.
+   If it is waiting legitimately, `horch dispatch hold`. For infrastructure failures use
+   `horch dispatch fail --infra`; otherwise decide whether to fail and retry.
 8. On "blocked": `horch worker read`. Approve only what these rules allow; otherwise ask me.
 9. Have a different agent review each PR (`claude` builds → `codex` reviews, or the reverse).
    The reviewer owns the PR until merge: `horch worker retain` it, and send fixes back to it.
@@ -223,6 +224,8 @@ receipt meanings, launch metadata flags and restart semantics.
 | Worker ran `horch done` and herdr shows it idle/done | Settle `completed` (or `failed` with `--failed`). Coordinator gets a `done` message. |
 | Worker reported done but is still working | Wait for the turn to end, then settle. |
 | Worker idle without reporting for the run's delay (default 3m) | One `escalation` to the coordinator with the screen tail. **Dispatch stays open.** |
+| Dispatch held | Suppress supervision reminders until the deadline or explicit resume; completion still settles. |
+| Usage cap detected | One escalation and a persistent hold until reset, or explicit resume if reset is unknown. |
 | Coordinator decides | `horch dispatch nudge --task tN` (asks it to report; refused while working) or `horch dispatch fail --task tN --reason …`. |
 | Blocked at a prompt for 20s | Escalation + herdr notification. Short blips that clear by themselves are ignored. |
 | No activity at all for 90s after dispatch | One escalation: the prompt may not have landed. horch never re-sends on its own. |
@@ -231,6 +234,56 @@ receipt meanings, launch metadata flags and restart semantics.
 
 Statuses: runs `idle|running|completed|failed`, tasks `pending|ready|dispatched|completed|failed|blocked`,
 dispatches `pending|dispatched|completed|failed|circuit_broken`, gates `pending|resolved|timeout`.
+
+## Holds, usage caps and worker recovery
+
+```bash
+horch dispatch hold --task t1 --until 45m --reason "Waiting on review"
+horch dispatch hold --task t1 --until 2026-12-01T13:00:00-08:00 --reason "Waiting for reset"
+horch dispatch hold --task t1 --until event:review-complete --reason "Owner will resume"
+horch dispatch resume --task t1
+horch dispatch fail --task t1 --infra --reason "Account unavailable"
+horch worker restart --worker helper --unset API_KEY --env PROFILE=alternate
+horch worker release --worker helper --hand-off-to owner
+```
+
+A hold is persisted on the active dispatch and suppresses idle, blocked and no-activity
+reminders. It survives status changes and daemon restarts. Timed holds expire automatically;
+`event:<name>` is a descriptive condition released explicitly with `dispatch resume --task`.
+Resume starts a fresh supervision grace period. A worker's `done` report still settles
+normally during a hold, and a hold does not stop a running agent.
+
+For idle, done or blocked panes, horch recognizes standalone usage-cap notices and reports
+one `usage cap until <time>` escalation. The notice, cap deadline, hold and escalation are
+saved together. RFC3339 resets, reset durations and clock times are supported; clock times
+use the daemon's local timezone unless the notice includes an IANA timezone. A missing or
+ambiguous reset produces an `event:usage-reset` hold for explicit resume. The same visible
+notice does not repeat or reapply after reset/resume; it must disappear before another
+cap episode is recognized. Existing coordinator holds are preserved, including a cap that
+outlasts a shorter timed hold. Hold expiry resumes monitoring; it does not send an agent prompt.
+
+`dispatch fail --infra` records an infrastructure failure and refunds that dispatch's
+attempt. Ordinary `dispatch fail` keeps its existing circuit-breaker behavior. A pane that
+exits while held for a detected usage cap is also fenced without consuming its attempt.
+
+`worker restart` supports managed claude, codex and pi workers with saved launch arguments.
+It requests a clean agent exit, proves the pane has returned to its shell, applies repeatable
+`--env KEY=VAL` and `--unset KEY` changes, and waits for a unique verification acknowledgment
+before starting the same agent with the same arguments. Environment edits use a private temporary script sourced by the pane shell, removed
+afterward; values are not added to the database, pane transport or diagnostic messages. Adopted workers and workers started before launch
+arguments were recorded refuse restart instead of guessing. Workers launched with
+`--worktree` retain their launch arguments too; restart reuses their current pane. A failed or
+interrupted restart keeps the task claimed and monitoring held; inspect the pane and retry restart or explicitly
+stop/abandon. Successful restart replaces the old dispatch, clears its holds, and re-delivers
+the same task without increasing attempts. It never releases the task to auto-dispatch in
+between. An interrupted release requires an explicit release/stop/abandon retry.
+
+`worker release --hand-off-to` requires another registered live agent in the same actual git
+worktree (verified from the pane's current directory, resolving symlinks). It records the
+recipient, time and worktree on the released worker and informs the coordinator. This allows
+a helper to leave uncommitted or unpushed work for its owner without `--force`. Active dispatches
+still block release, and the normal process-exit verification still applies. Responsibility
+transfer does not commit, push or delete files. The recipient is reserved during hand-off.
 
 ## Configuration
 
@@ -411,7 +464,7 @@ runtime actually do, which is useful if you write your own plugin.
 - **A worker started but `worker start` timed out.** Slow agents (many MCP servers) can take over a
   minute. horch waits up to 2 more minutes and then registers it. If it still failed, adopt the pane:
   `horch worker register --pane <id> --name <name>`.
-- **`unsaved_work` on release.** Commit and push, or `--force` to discard.
+- **`unsaved_work` on release.** Commit and push, or hand off to a live owner in the same worktree with `--hand-off-to`. `--force` remains an explicit override.
 
 ## Uninstall
 

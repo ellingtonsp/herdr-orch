@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -183,7 +186,7 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, Account: a.Account, Profile: a.Profile, Model: a.Model})
+	w, err := e.st.RegisterWorker(store.Worker{PaneID: pane.PaneID, RunID: run.ID, Name: a.Name, Agent: a.Agent, Worktree: a.Cwd, AgentArgs: a.Args, LaunchKnown: true, Account: a.Account, Profile: a.Profile, Model: a.Model})
 	if err != nil {
 		return w, err
 	}
@@ -242,10 +245,11 @@ func (e *Engine) opWorkerRegister(ctx context.Context, caller string, raw json.R
 }
 
 type WorkerRef struct {
-	Worker string `json:"worker"`
-	Force  bool   `json:"force,omitempty"`
-	Lines  int    `json:"lines,omitempty"`
-	Off    bool   `json:"off,omitempty"`
+	Worker    string `json:"worker"`
+	Force     bool   `json:"force,omitempty"`
+	Lines     int    `json:"lines,omitempty"`
+	Off       bool   `json:"off,omitempty"`
+	HandOffTo string `json:"hand_off_to,omitempty"`
 }
 
 func (e *Engine) findWorker(caller, ref string) (store.Worker, error) {
@@ -341,6 +345,15 @@ func (e *Engine) opWorkerAbandon(_ context.Context, caller string, raw json.RawM
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	w, err = e.st.GetWorker(w.PaneID)
+	if err != nil {
+		return nil, err
+	}
+	restorePhase := w.Lifecycle
+	if err := e.st.BeginWorkerLifecycle(w.PaneID, "abandoning"); err != nil {
+		return nil, err
+	}
+	defer func() { e.finishWorkerLifecycleLocked(w.PaneID, restorePhase) }()
 	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
 		st, err := e.st.Fence(d.ID, "worker abandoned")
 		if err != nil {
@@ -351,6 +364,7 @@ func (e *Engine) opWorkerAbandon(_ context.Context, caller string, raw json.RawM
 	if err := e.st.SetWorkerState(w.PaneID, store.WorkerAbandoned, "abandoned; pane left running", ""); err != nil {
 		return nil, err
 	}
+	restorePhase = ""
 	e.badgeTask(w.PaneID, "")
 	e.recomputeWatch()
 	e.notify.broadcast()
@@ -358,6 +372,262 @@ func (e *Engine) opWorkerAbandon(_ context.Context, caller string, raw json.RawM
 }
 
 func mustWorker(w store.Worker, _ error) store.Worker { return w }
+
+// finishWorkerLifecycleLocked restores the reservation and replays the latest held
+// status through normal bookkeeping without letting a newer event race the replay.
+func (e *Engine) finishWorkerLifecycleLocked(pane, restore string) {
+	if err := e.st.SetWorkerLifecycle(pane, restore); err != nil {
+		return
+	}
+	if restore == "" {
+		status := e.status[pane]
+		delete(e.status, pane)
+		if status != "" {
+			e.setStatusLocked(pane, status)
+		}
+	}
+}
+
+func (e *Engine) finishWorkerLifecycle(pane, restore string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.finishWorkerLifecycleLocked(pane, restore)
+}
+
+type WorkerRestartArgs struct {
+	Worker string   `json:"worker"`
+	Env    []string `json:"env,omitempty"`
+	Unset  []string `json:"unset,omitempty"`
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// restartEnvironment builds a private shell script which emits only a nonce after all
+// requested mutations are verified. The script is sourced by path, never typed into
+// the terminal, so values and their encodings stay out of transcripts and shell history.
+func restartEnvironment(a WorkerRestartArgs, nonce string) (string, error) {
+	seen := map[string]bool{}
+	parts := []string{"set +x"}
+	octal := func(s string) string {
+		var b strings.Builder
+		for _, c := range []byte(s) {
+			fmt.Fprintf(&b, "\\%03o", c)
+		}
+		return b.String()
+	}
+	for _, pair := range a.Env {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || !envName.MatchString(key) || strings.ContainsRune(value, 0) || seen[key] {
+			return "", refusal("bad_args", "--env requires unique valid KEY=VAL entries without NUL bytes")
+		}
+		seen[key] = true
+		// A trailing sentinel preserves newlines stripped by command substitution.
+		if key == "_horch_value" {
+			return "", refusal("bad_args", "reserved restart environment key")
+		}
+		parts = append(parts, fmt.Sprintf("_horch_value=$(command printf '%%b_' '%s') && _horch_value=${_horch_value%%_} && export %s=\"$_horch_value\" && [ \"${%s}\" = \"$_horch_value\" ]", octal(value), key, key))
+	}
+	for _, key := range a.Unset {
+		if key == "_horch_value" {
+			return "", refusal("bad_args", "reserved restart environment key")
+		}
+		if !envName.MatchString(key) || seen[key] {
+			return "", refusal("bad_args", "--unset requires unique valid keys without --env conflicts")
+		}
+		seen[key] = true
+		parts = append(parts, fmt.Sprintf("unset %s && [ \"${%s+x}\" != x ]", key, key))
+	}
+	parts = append(parts, "unset _horch_value", fmt.Sprintf("command printf '%%s%%s\\n' 'HORCH_RESTART_' '%s'", nonce))
+	return " " + strings.Join(parts, " && "), nil
+}
+
+func (e *Engine) opWorkerRestart(ctx context.Context, caller string, raw json.RawMessage) (out any, err error) {
+	a, err := decode[WorkerRestartArgs](raw)
+	if err != nil {
+		return nil, err
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return nil, err
+	}
+	nonce := hex.EncodeToString(token[:])
+	command, err := restartEnvironment(a, nonce)
+	if err != nil {
+		return nil, err
+	}
+	w, err := e.findWorker(caller, a.Worker)
+	if err != nil {
+		return nil, err
+	}
+	if w.State != store.WorkerLive {
+		return nil, refusal("worker_not_live", "worker %s is %s", w.PaneID, w.State)
+	}
+	if !w.LaunchKnown || w.Agent == "" || w.Name == "" {
+		return nil, refusal("restart_config_unknown", "worker has no persisted launch configuration; start a managed worker first")
+	}
+	quit := "/exit"
+	switch w.Agent {
+	case "codex", "claude":
+	case "pi":
+		quit = "/quit"
+	default:
+		return nil, refusal("restart_unsupported", "no clean exit command is known for agent %s", w.Agent)
+	}
+	e.mu.Lock()
+	err = e.st.BeginWorkerLifecycle(w.PaneID, "restart")
+	e.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err != nil {
+			_ = e.st.SetWorkerLifecycle(w.PaneID, "restart_failed")
+			e.escalateLocked(w.RunID, "worker restart needs attention", fmt.Sprintf("Restart of worker %s failed. Its task remains claimed and supervision is held. Inspect the pane and retry worker restart or explicitly stop/abandon it.", w.PaneID), "")
+		}
+		e.notify.broadcast()
+	}()
+	p, err := e.h.PaneGet(ctx, w.PaneID)
+	if err != nil {
+		return nil, refusal("restart_failed", "cannot inspect worker pane")
+	}
+	if p.Agent != nil && *p.Agent != "" {
+		if err = e.h.SendText(ctx, w.PaneID, quit); err != nil {
+			return nil, refusal("restart_failed", "could not request clean agent exit")
+		}
+	}
+	if err = e.awaitRestartShell(ctx, w.PaneID); err != nil {
+		return nil, err
+	}
+	script, fileErr := os.CreateTemp("", "horch-restart-*")
+	if fileErr != nil {
+		return nil, refusal("restart_failed", "could not prepare private environment script")
+	}
+	defer os.Remove(script.Name())
+	_, writeErr := script.WriteString(command + "\n")
+	closeErr := script.Close()
+	if writeErr != nil || closeErr != nil {
+		return nil, refusal("restart_failed", "could not prepare private environment script")
+	}
+	// CreateTemp uses mode 0600. Only the pathname crosses the pane transport.
+	source := " . '" + strings.ReplaceAll(script.Name(), "'", "'\\''") + "'"
+	if err = e.h.SendText(ctx, w.PaneID, source); err != nil {
+		return nil, refusal("restart_failed", "could not apply shell environment")
+	}
+	if err = e.awaitRestartAck(ctx, w.PaneID, "HORCH_RESTART_"+nonce); err != nil {
+		return nil, err
+	}
+	ag, err := e.h.AgentStart(ctx, w.Name, w.Agent, w.PaneID, w.AgentArgs)
+	if herdr.ErrCode(err) == "timeout" {
+		if late, ok := e.awaitLateStart(ctx, w.PaneID, w.Name); ok {
+			ag, err = late, nil
+		}
+	}
+	if err != nil {
+		return nil, refusal("restart_failed", "agent launch failed; inspect the worker pane")
+	}
+	if ag.AgentStatus == "blocked" || ag.InteractiveReady == nil || !*ag.InteractiveReady {
+		return nil, refusal("restart_failed", "restarted agent is not proven interactive")
+	}
+	e.mu.Lock()
+	e.status[w.PaneID] = ag.AgentStatus
+	delete(e.blocked, w.PaneID)
+	delete(e.blockedTold, w.PaneID)
+	d, dErr := e.st.ActiveDispatchForPane(w.PaneID)
+	if dErr == nil {
+		d, err = e.st.ReplaceWorkerDispatch(d.ID)
+	} else if !errors.Is(dErr, store.ErrNotFound) {
+		err = dErr
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if dErr == nil {
+		t, tErr := e.st.GetTask(d.TaskID)
+		if tErr != nil {
+			return nil, tErr
+		}
+		// A named restarted agent must accept the prompt itself; never type it into
+		// a possibly returned shell on an ambiguous delivery failure.
+		if err = e.h.AgentPrompt(ctx, w.PaneID, buildPrompt(t, d.ID, e.horchCmd(w.PaneID))); err != nil {
+			return nil, refusal("restart_failed", "task delivery is unconfirmed; inspect the worker before retrying")
+		}
+		e.mu.Lock()
+		err = e.st.MarkSent(d.ID, "sent after worker restart")
+		e.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+	e.mu.Lock()
+	err = e.st.SetWorkerLifecycle(w.PaneID, "")
+	if err == nil {
+		status := e.status[w.PaneID]
+		delete(e.status, w.PaneID)
+		e.setStatusLocked(w.PaneID, status)
+		if dErr == nil {
+			d, err = e.st.GetDispatch(d.ID)
+		}
+		e.recomputeWatch()
+		out = map[string]any{"worker": mustWorker(e.st.GetWorker(w.PaneID)), "environment_verified": true}
+		if dErr == nil {
+			out.(map[string]any)["dispatch"] = d
+		}
+	}
+	e.mu.Unlock()
+	return out, err
+}
+
+func (e *Engine) awaitRestartShell(ctx context.Context, pane string) error {
+	deadline := time.Now().Add(e.startGrace)
+	for {
+		p, pErr := e.h.PaneGet(ctx, pane)
+		info, iErr := e.h.ProcessInfo(ctx, pane)
+		if pErr == nil && iErr == nil && (p.Agent == nil || *p.Agent == "") && info.ShellPID > 0 {
+			ready := true
+			for _, proc := range info.ForegroundProcesses {
+				if proc.PID != info.ShellPID {
+					ready = false
+				}
+			}
+			if ready {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return refusal("restart_failed", "clean agent exit and available shell could not be proven")
+		}
+		select {
+		case <-ctx.Done():
+			return refusal("restart_failed", "restart cancelled while waiting for shell")
+		case <-time.After(e.promptRetry):
+		}
+	}
+}
+
+func (e *Engine) awaitRestartAck(ctx context.Context, pane, marker string) error {
+	deadline := time.Now().Add(e.startGrace)
+	for {
+		text, err := e.h.PaneRead(ctx, pane, 40)
+		if err == nil {
+			for _, line := range strings.Split(text, "\n") {
+				if strings.TrimSpace(line) == marker {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return refusal("restart_failed", "shell environment verification was not acknowledged")
+		}
+		select {
+		case <-ctx.Done():
+			return refusal("restart_failed", "restart cancelled during environment verification")
+		case <-time.After(e.promptRetry):
+		}
+	}
+}
 
 func (e *Engine) afterFenceLocked(st store.Settlement) {
 	e.messageCoordinatorLocked(st.Dispatch.RunID, store.KindNote, "dispatch "+st.Dispatch.ID+" fenced",
@@ -375,6 +645,19 @@ func (e *Engine) opWorkerStop(ctx context.Context, caller string, raw json.RawMe
 	if err != nil {
 		return nil, err
 	}
+	e.mu.Lock()
+	w, err = e.st.GetWorker(w.PaneID)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	restorePhase := w.Lifecycle
+	if err := e.st.BeginWorkerLifecycle(w.PaneID, "stopping"); err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	e.mu.Unlock()
+	defer func() { e.finishWorkerLifecycle(w.PaneID, restorePhase) }()
 	if !a.Force {
 		if reasons := worktreeUnsaved(w.Worktree); len(reasons) > 0 {
 			return nil, e.refuseUnsaved(w, "stop", reasons)
@@ -382,10 +665,14 @@ func (e *Engine) opWorkerStop(ctx context.Context, caller string, raw json.RawMe
 	}
 	e.mu.Lock()
 	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
-		if st, err := e.st.Fence(d.ID, "worker stopped"); err == nil {
-			e.afterFenceLocked(st)
+		st, err := e.st.Fence(d.ID, "worker stopped")
+		if err != nil {
+			e.mu.Unlock()
+			return nil, err
 		}
+		e.afterFenceLocked(st)
 	}
+	restorePhase = ""
 	e.mu.Unlock()
 	return e.closeWorker(ctx, w, store.WorkerStopped, false)
 }
@@ -404,22 +691,114 @@ func (e *Engine) opWorkerRelease(ctx context.Context, caller string, raw json.Ra
 	if w.State != store.WorkerLive && w.State != store.WorkerReleaseFailed {
 		return nil, refusal("worker_not_live", "worker %s is %s", w.PaneID, w.State)
 	}
+	e.mu.Lock()
+	w, err = e.st.GetWorker(w.PaneID)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	restorePhase := w.Lifecycle
+	if err := e.st.BeginWorkerLifecycle(w.PaneID, "releasing"); err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	e.mu.Unlock()
+	defer func() { e.finishWorkerLifecycle(w.PaneID, restorePhase) }()
 	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil && !a.Force {
 		return nil, refusal("worker_busy", "worker %s has active dispatch %s (task %s); wait for it or use `horch worker stop`", w.PaneID, d.ID, d.TaskID)
 	}
-	if !a.Force {
+	if a.HandOffTo != "" {
+		if a.Force {
+			return nil, refusal("bad_args", "--hand-off-to cannot be combined with --force")
+		}
+		target, err := e.findWorker(caller, a.HandOffTo)
+		if err != nil {
+			return nil, err
+		}
+		e.mu.Lock()
+		if target.PaneID == w.PaneID || target.State != store.WorkerLive || e.st.WorkerLifecycleHeld(target.PaneID) {
+			e.mu.Unlock()
+			return nil, refusal("invalid_hand_off", "hand-off target must be another live worker")
+		}
+		// Hold the recipient until the source pane has closed, so it cannot be released
+		// concurrently after accepting responsibility.
+		if err := e.st.BeginWorkerLifecycle(target.PaneID, "receiving_hand_off"); err != nil {
+			e.mu.Unlock()
+			return nil, err
+		}
+		e.mu.Unlock()
+		defer e.finishWorkerLifecycle(target.PaneID, "")
+		root, err := e.handOffRoot(ctx, w, target)
+		if err != nil {
+			return nil, err
+		}
+		e.mu.Lock()
+		err = e.st.RecordWorkerHandOff(w.PaneID, target.PaneID, root)
+		if err == nil {
+			e.messageCoordinatorLocked(w.RunID, store.KindNote, "worker responsibility transferred", fmt.Sprintf("Worker %s transferred responsibility for %s to live worker %s before release.", w.PaneID, root, target.PaneID), "", "")
+		}
+		e.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	} else if !a.Force {
 		if reasons := worktreeUnsaved(w.Worktree); len(reasons) > 0 {
 			return nil, e.refuseUnsaved(w, "release", reasons)
 		}
 	}
 	if d, err := e.st.ActiveDispatchForPane(w.PaneID); err == nil {
 		e.mu.Lock()
-		if st, err := e.st.Fence(d.ID, "worker released"); err == nil {
-			e.afterFenceLocked(st)
+		st, err := e.st.Fence(d.ID, "worker released")
+		if err != nil {
+			e.mu.Unlock()
+			return nil, err
 		}
+		e.afterFenceLocked(st)
 		e.mu.Unlock()
 	}
+	restorePhase = ""
 	return e.closeWorker(ctx, w, store.WorkerReleased, true)
+}
+
+func actualWorktree(ctx context.Context, h Herdr, w store.Worker) (string, error) {
+	p, err := h.PaneGet(ctx, w.PaneID)
+	if err != nil || p.Agent == nil || *p.Agent == "" {
+		return "", refusal("invalid_hand_off", "worker %s has no live agent", w.PaneID)
+	}
+	dir := ""
+	if p.ForegroundCwd != nil {
+		dir = *p.ForegroundCwd
+	}
+	if dir == "" && p.Cwd != nil {
+		dir = *p.Cwd
+	}
+	if dir == "" {
+		return "", refusal("invalid_hand_off", "cannot prove actual worktree for worker %s", w.PaneID)
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", refusal("invalid_hand_off", "cannot prove actual git worktree for worker %s", w.PaneID)
+	}
+	root, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", refusal("invalid_hand_off", "cannot resolve actual worktree for worker %s", w.PaneID)
+	}
+	return root, nil
+}
+
+func (e *Engine) handOffRoot(ctx context.Context, source, target store.Worker) (string, error) {
+	a, err := actualWorktree(ctx, e.h, source)
+	if err != nil {
+		return "", err
+	}
+	b, err := actualWorktree(ctx, e.h, target)
+	if err != nil {
+		return "", err
+	}
+	if a != b {
+		return "", refusal("invalid_hand_off", "workers must share the same actual git worktree")
+	}
+	return a, nil
 }
 
 func (e *Engine) refuseUnsaved(w store.Worker, verb string, reasons []string) error {
@@ -573,6 +952,9 @@ func (e *Engine) Sweep(ctx context.Context) {
 	}
 	now := e.st.Now()
 	for _, w := range ws {
+		if e.st.WorkerLifecycleHeld(w.PaneID) {
+			continue
+		}
 		switch w.State {
 		case store.WorkerLive:
 			p, err := e.h.PaneGet(ctx, w.PaneID)

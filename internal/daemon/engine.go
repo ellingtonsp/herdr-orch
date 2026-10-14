@@ -79,6 +79,7 @@ type Engine struct {
 	blockedTold map[string]bool           // pane → current blocked episode already escalated
 	closing     map[string]bool           // panes we are closing ourselves
 	consumers   map[string]*consumerLease // active destructive mailbox RPC by recipient
+	capChecked  map[string]time.Time      // dispatch -> last usage-cap screen check
 	watchMu     sync.Mutex
 	watched     map[string]bool
 	rewatch     chan struct{}
@@ -102,6 +103,9 @@ type Engine struct {
 }
 
 func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
+	if err := st.RecoverWorkerLifecycles(); err != nil {
+		log.Printf("recover worker lifecycle: %v", err)
+	}
 	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
 	return &Engine{
 		deliveryCtx: deliveryCtx, deliveryCancel: deliveryCancel,
@@ -114,6 +118,7 @@ func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
 		notify:      notifier{ch: make(chan struct{})},
 		logf:        log.Printf,
 		status:      map[string]string{},
+		capChecked:  map[string]time.Time{},
 		blocked:     map[string]time.Time{},
 		blockedTold: map[string]bool{},
 		closing:     map[string]bool{},
@@ -265,11 +270,22 @@ func (e *Engine) setStatus(pane, status string) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.setStatusLocked(pane, status)
+}
+
+// setStatusLocked reconciles the current status while the caller owns the engine lock.
+func (e *Engine) setStatusLocked(pane, status string) {
+	if pane == "" || status == "" {
+		return
+	}
 	prev := e.status[pane]
 	if prev == status {
 		return
 	}
 	e.status[pane] = status
+	if e.st.WorkerLifecycleHeld(pane) {
+		return
+	}
 	if status == "working" {
 		e.workingSeq[pane]++
 	}
@@ -307,11 +323,17 @@ func (e *Engine) paneGone(pane, why string) {
 	delete(e.status, pane)
 	delete(e.blocked, pane)
 	delete(e.blockedTold, pane)
-	if e.closing[pane] {
+	if e.closing[pane] || e.st.WorkerLifecycleHeld(pane) {
 		return
 	}
 	if d, err := e.st.ActiveDispatchForPane(pane); err == nil {
-		e.settleLocked(d, false, "failed: pane_"+why, "")
+		if d.UsageCapNotice != "" && d.Held(e.st.Now().UnixMilli()) {
+			if st, err := e.st.Fence(d.ID, "usage cap: pane_"+why); err == nil {
+				e.afterSettleLocked(st)
+			}
+		} else {
+			e.settleLocked(d, false, "failed: pane_"+why, "")
+		}
 	}
 	if w, err := e.st.GetWorker(pane); err == nil && w.State == store.WorkerLive {
 		_ = e.st.SetWorkerState(pane, store.WorkerExited, "pane "+why, "")
@@ -365,7 +387,10 @@ func (e *Engine) Tick() {
 func (e *Engine) escalateBlockedLocked() {
 	now := e.st.Now()
 	for pane, since := range e.blocked {
-		if e.blockedTold[pane] || now.Sub(since) < e.cfg.BlockedAfter {
+		if e.st.WorkerLifecycleHeld(pane) || e.blockedTold[pane] || now.Sub(since) < e.cfg.BlockedAfter {
+			continue
+		}
+		if d, err := e.st.ActiveDispatchForPane(pane); err == nil && d.Held(now.UnixMilli()) {
 			continue
 		}
 		e.blockedTold[pane] = true
@@ -390,7 +415,7 @@ func (e *Engine) escalateBlockedLocked() {
 // Silence is never failure: only the worker's own --failed report, its pane going away, a
 // stop, or the coordinator's `horch dispatch fail` fails a dispatch.
 func (e *Engine) evaluateLocked(d store.Dispatch) {
-	if !d.Active() || d.Status == store.DispatchPending {
+	if !d.Active() || d.Status == store.DispatchPending || e.st.WorkerLifecycleHeld(d.PaneID) {
 		return
 	}
 	now := e.st.Now().UnixMilli()
@@ -409,6 +434,17 @@ func (e *Engine) evaluateLocked(d store.Dispatch) {
 		e.settleLocked(d, ok, outcome, result)
 		return
 	}
+	if d.HoldUntil > 0 && d.HoldUntil <= now {
+		var err error
+		d, err = e.expireHoldLocked(d)
+		if err != nil {
+			return
+		}
+	}
+	d = e.detectCapLocked(d)
+	if d.Held(now) {
+		return
+	}
 	if d.DoneMessageID == "" && d.SawWorking && d.IdleSince > 0 && !d.IdleEscalated &&
 		(status == "idle" || status == "done") && now-d.IdleSince >= e.idleReportAfter(d.RunID).Milliseconds() {
 		_ = e.st.MarkIdleEscalated(d.ID)
@@ -423,7 +459,7 @@ func (e *Engine) evaluateLocked(d store.Dispatch) {
 			fmt.Sprintf("worker %s idle on task %s without reporting", d.PaneID, d.TaskID), body, d.TaskID, "")
 		return
 	}
-	if !d.SawWorking && d.DoneMessageID == "" && !d.UnobservedEscalated && now-d.StartedAt >= e.cfg.UnobservedAfter.Milliseconds() {
+	if !d.SawWorking && d.DoneMessageID == "" && !d.UnobservedEscalated && now-max(d.StartedAt, d.MonitorAfter) >= e.cfg.UnobservedAfter.Milliseconds() {
 		_ = e.st.MarkUnobservedEscalated(d.ID)
 		e.escalateLocked(d.RunID, fmt.Sprintf("dispatch %s: no activity observed", d.ID),
 			fmt.Sprintf("Dispatch %s (task %s) to %s has shown no activity for %s. The prompt may not have landed; check with `horch worker read --worker %s` before re-sending.", d.ID, d.TaskID, d.PaneID, e.cfg.UnobservedAfter, d.PaneID), d.TaskID)
@@ -470,6 +506,7 @@ func (e *Engine) settleLocked(d store.Dispatch, ok bool, outcome, result string)
 
 func (e *Engine) afterSettleLocked(st store.Settlement) {
 	d, t := st.Dispatch, st.Task
+	delete(e.capChecked, d.ID)
 	switch d.Status {
 	case store.DispatchCompleted:
 		body := fmt.Sprintf("Task %s (%s) completed by %s (dispatch %s).", t.ID, t.Title, d.PaneID, d.ID)

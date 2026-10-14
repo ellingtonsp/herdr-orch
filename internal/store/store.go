@@ -176,7 +176,18 @@ var migrations = []string{
 	`CREATE TRIGGER plan_events_no_replace BEFORE INSERT ON plan_events
 		WHEN EXISTS(SELECT 1 FROM plan_events WHERE seq=NEW.seq)
 		BEGIN SELECT RAISE(ABORT, 'plan_events is append-only'); END;`,
-	// 5: requested worker launch metadata and durable dispatch report history.
+	// 5: durable dispatch holds and usage-cap deduplication.
+	`ALTER TABLE dispatches ADD COLUMN hold_until INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN hold_event TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN hold_reason TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN held_by TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN monitor_after INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN usage_cap_notice TEXT NOT NULL DEFAULT '';
+ ALTER TABLE dispatches ADD COLUMN usage_cap_until INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE dispatches ADD COLUMN usage_cap_unknown INTEGER NOT NULL DEFAULT 0;`,
+	// 6: worker launch configuration, restart holds and hand-off receipts.
+	WorkerLifecycleMigration,
+	// 7: requested worker launch metadata and durable dispatch report history.
 	`ALTER TABLE workers ADD COLUMN account TEXT;
 	ALTER TABLE workers ADD COLUMN profile TEXT;
 	ALTER TABLE workers ADD COLUMN model TEXT;
@@ -191,7 +202,7 @@ var migrations = []string{
 		SELECT id,done_message_id,0 FROM dispatches
 		WHERE done_message_id IN (SELECT id FROM messages);
 	CREATE INDEX dispatch_reports_dispatch ON dispatch_reports(dispatch_id);`,
-	// 6: durable terminal delivery and pickup evidence, separate from mailbox reads.
+	// 8: durable terminal delivery and pickup evidence, separate from mailbox reads.
 	`ALTER TABLE messages ADD COLUMN delivery_status TEXT NOT NULL DEFAULT '';
  ALTER TABLE messages ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;
  ALTER TABLE messages ADD COLUMN delivered_at INTEGER;

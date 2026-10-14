@@ -40,13 +40,17 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch dispatch --task T --to PANE|NAME|new:<agent> [--cwd DIR]     horch dispatch --spec S --to ...
   horch dispatch show --task T | --id D              horch dispatch next [--run R]
   horch dispatch nudge --task T [--text S] [--force]  (remind an idle worker to report)
-  horch dispatch fail --task T --reason R            (coordinator declares it failed)
+  horch dispatch fail --task T --reason R [--infra]  (infra refunds the attempt)
+  horch dispatch hold --task T --until RFC3339|duration|event:NAME --reason R
+  horch dispatch resume --task T
 
   horch pr watch <n> [--until green|merged] [--repo owner/name] [--interval 15s] [--race-window 5s] [--run R]
 
   horch worker start --agent claude|pi|codex [--worktree DIR | --pane PANE] [--name N] [--account LABEL] [--profile LABEL] [--model ID] [-- agent args]
   horch worker register [--pane PANE] [--name N]
   horch worker show|read|stop|release|retain|abandon --worker PANE|NAME [--force] [--lines N] [--off]
+  horch worker restart --worker W [--env KEY=VAL] [--unset KEY]
+  horch worker release --worker W [--hand-off-to W]
   horch worker list [--all]
 
   horch gate create [--task T] --question Q [--options a,b] [--timeout 1h]
@@ -205,7 +209,7 @@ func dispatch(ctx context.Context, args []string) error {
 	case "task":
 		return cmdTask(ctx, sub, tail(rest))
 	case "dispatch":
-		if sub == "show" || sub == "next" || sub == "nudge" || sub == "fail" {
+		if sub == "show" || sub == "next" || sub == "nudge" || sub == "fail" || sub == "hold" || sub == "resume" {
 			return cmdDispatchSub(ctx, sub, tail(rest))
 		}
 		return cmdDispatch(ctx, rest)
@@ -597,6 +601,8 @@ func cmdDispatch(ctx context.Context, args []string) error {
 
 func cmdDispatchSub(ctx context.Context, sub string, args []string) error {
 	f := fs("dispatch " + sub)
+	until := f.String("until", "", "")
+	infra := f.Bool("infra", false, "")
 	task := f.String("task", "", "")
 	id := f.String("id", "", "")
 	runID := f.String("run", "", "")
@@ -622,8 +628,22 @@ func cmdDispatchSub(ctx context.Context, sub string, args []string) error {
 			_ = json.Unmarshal(raw, &r)
 			fmt.Printf("nudged %s on task %s (nudge %d)\n", r.Dispatch.PaneID, r.Dispatch.TaskID, r.Nudges)
 		})
+	case "hold", "resume":
+		return run(ctx, "dispatch."+sub, daemon.DispatchHoldArgs{Task: *task, Until: *until, Reason: *reason}, func(raw json.RawMessage) {
+			var d store.Dispatch
+			_ = json.Unmarshal(raw, &d)
+			if sub == "resume" {
+				fmt.Printf("resumed task %s (dispatch %s)\n", d.TaskID, d.ID)
+				return
+			}
+			until := "event:" + d.HoldEvent
+			if d.HoldUntil > 0 {
+				until = time.UnixMilli(d.HoldUntil).Format(time.RFC3339)
+			}
+			fmt.Printf("held task %s until %s: %s\n", d.TaskID, until, d.HoldReason)
+		})
 	case "fail":
-		return run(ctx, "dispatch.fail", daemon.DispatchActArgs{Task: *task, Reason: *reason}, func(raw json.RawMessage) {
+		return run(ctx, "dispatch.fail", daemon.DispatchActArgs{Task: *task, Reason: *reason, Infra: *infra}, func(raw json.RawMessage) {
 			var st store.Settlement
 			_ = json.Unmarshal(raw, &st)
 			fmt.Printf("dispatch %s %s; task %s is %s (attempt %d)\n", st.Dispatch.ID, st.Dispatch.Status, st.Task.ID, st.Task.Status, st.Task.Attempts)
@@ -643,6 +663,10 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 		}
 	}
 	f := fs("worker " + sub)
+	var env, unset []string
+	f.Func("env", "environment assignment (repeatable)", func(v string) error { env = append(env, v); return nil })
+	f.Func("unset", "environment key (repeatable)", func(v string) error { unset = append(unset, v); return nil })
+	handOff := f.String("hand-off-to", "", "")
 	runID := f.String("run", "", "")
 	worker := f.String("worker", "", "")
 	agent := f.String("agent", "", "")
@@ -664,8 +688,10 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	if *worker == "" {
 		*worker = pos
 	}
-	ref := daemon.WorkerRef{Worker: *worker, Force: *force, Lines: *lines, Off: *off}
+	ref := daemon.WorkerRef{Worker: *worker, Force: *force, Lines: *lines, Off: *off, HandOffTo: *handOff}
 	switch sub {
+	case "restart":
+		return run(ctx, "worker.restart", daemon.WorkerRestartArgs{Worker: *worker, Env: env, Unset: unset}, nil)
 	case "start":
 		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Worktree: *worktree, Args: extra, Pane: *pane, Account: *account, Profile: *profile, Model: *model}, printWorker)
 	case "register":

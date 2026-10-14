@@ -117,6 +117,9 @@ func (e *Engine) waitPickup(ctx context.Context, messages []store.Message, timeo
 }
 
 func (e *Engine) readyPane(ctx context.Context, pane string) (bool, error) {
+	if e.st.WorkerLifecycleHeld(pane) {
+		return false, nil
+	}
 	p, err := e.h.PaneGet(ctx, pane)
 	if err != nil {
 		return false, err
@@ -196,6 +199,9 @@ func (e *Engine) awaitPickup(ctx context.Context, m store.Message, seq uint64) b
 		}
 		p, err := e.h.PaneGet(ctx, m.To)
 		if ctx.Err() != nil {
+			return false
+		}
+		if e.st.WorkerLifecycleHeld(m.To) {
 			return false
 		}
 		if e.workingGeneration(m.To) > seq || (err == nil && p.AgentStatus == "working") {

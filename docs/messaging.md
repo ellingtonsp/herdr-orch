@@ -4,7 +4,8 @@
 background delivery job, serialized per pane. A busy worker can finish its current turn;
 startup hooks, unknown status and blocked dialogs are not input-ready states. The job waits
 up to two minutes per attempt for two consecutive idle/done readiness observations, 500 ms
-apart. Where herdr exposes `interactive_ready`, it must not be false.
+apart. Worker restart/release reservations also block terminal delivery; lifecycle activity
+is not pickup evidence. Where herdr exposes `interactive_ready`, it must not be false.
 
 ```sh
 horch send --to worker-a --body "Please inspect the new test failure." --wait-pickup
@@ -88,5 +89,10 @@ are also captured from `--account`, `--profile`, and `--model`/`-m` launch argum
 `--model` before the separator adds the agent's `--model` option unless one is already
 present; a model supplied in the agent arguments takes precedence. Values are supplied
 launch metadata, not verified account identity or proof of the effective runtime model.
-They are saved on the worker and snapshotted on each dispatch, then included in completion
+They are saved alongside restart launch arguments on the worker and snapshotted on each
+dispatch. Restart replacements retain the snapshot; release hand-offs preserve each
+worker's identity. Metadata is included in completion
 and late-report notifications. Do not put credentials in these labels.
+
+The messaging migrations follow the released dispatch-hold and worker-lifecycle migrations;
+existing holds, usage-cap notices, restart reservations and hand-off receipts are preserved.
