@@ -74,14 +74,26 @@ type Engine struct {
 	hub    planHub
 	logf   func(string, ...any)
 
-	capChecked  map[string]time.Time // dispatch -> last usage-cap screen check
-	status      map[string]string    // pane → last known agent status
-	blocked     map[string]time.Time // pane → when its current blocked episode began
-	blockedTold map[string]bool      // pane → current blocked episode already escalated
-	closing     map[string]bool      // panes we are closing ourselves
+	status      map[string]string         // pane → last known agent status
+	blocked     map[string]time.Time      // pane → when its current blocked episode began
+	blockedTold map[string]bool           // pane → current blocked episode already escalated
+	closing     map[string]bool           // panes we are closing ourselves
+	consumers   map[string]*consumerLease // active destructive mailbox RPC by recipient
+	capChecked  map[string]time.Time      // dispatch -> last usage-cap screen check
 	watchMu     sync.Mutex
 	watched     map[string]bool
 	rewatch     chan struct{}
+
+	deliveryMu     sync.Mutex
+	deliveryPanes  map[string]*sync.Mutex
+	deliveryCtx    context.Context
+	deliveryCancel context.CancelFunc
+	deliveryWG     sync.WaitGroup
+	deliveryLaunch func(func())
+	deliveryReady  time.Duration
+	deliveryPickup time.Duration
+	deliveryPoll   time.Duration
+	workingSeq     map[string]uint64
 
 	promptRetry time.Duration
 	startGrace  time.Duration // extra wait for an agent after herdr's start timeout
@@ -94,7 +106,12 @@ func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
 	if err := st.RecoverWorkerLifecycles(); err != nil {
 		log.Printf("recover worker lifecycle: %v", err)
 	}
+	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
 	return &Engine{
+		deliveryCtx: deliveryCtx, deliveryCancel: deliveryCancel,
+		deliveryPanes: map[string]*sync.Mutex{}, workingSeq: map[string]uint64{},
+		deliveryLaunch: func(f func()) { go f() },
+		deliveryReady:  2 * time.Minute, deliveryPickup: 10 * time.Second, deliveryPoll: 500 * time.Millisecond,
 		st:          st,
 		h:           h,
 		cfg:         cfg,
@@ -105,6 +122,7 @@ func NewEngine(st *store.Store, h Herdr, cfg Config) *Engine {
 		blocked:     map[string]time.Time{},
 		blockedTold: map[string]bool{},
 		closing:     map[string]bool{},
+		consumers:   map[string]*consumerLease{},
 		watched:     map[string]bool{},
 		rewatch:     make(chan struct{}, 1),
 		promptRetry: 750 * time.Millisecond,
@@ -267,6 +285,9 @@ func (e *Engine) setStatusLocked(pane, status string) {
 	e.status[pane] = status
 	if e.st.WorkerLifecycleHeld(pane) {
 		return
+	}
+	if status == "working" {
+		e.workingSeq[pane]++
 	}
 	if status == "blocked" {
 		if _, ok := e.blocked[pane]; !ok {
@@ -489,6 +510,7 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 	switch d.Status {
 	case store.DispatchCompleted:
 		body := fmt.Sprintf("Task %s (%s) completed by %s (dispatch %s).", t.ID, t.Title, d.PaneID, d.ID)
+		body += dispatchWorkerMetadata(d)
 		if t.Result != "" {
 			body += "\n\n" + t.Result
 		}
@@ -498,10 +520,10 @@ func (e *Engine) afterSettleLocked(st store.Settlement) {
 		e.messageCoordinatorLocked(d.RunID, store.KindDone, "task "+t.ID+" completed", body, t.ID, "succeeded")
 	case store.DispatchFailed:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s dispatch failed", t.ID),
-			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status), t.ID)
+			fmt.Sprintf("Dispatch %s of task %s (%s) to %s failed: %s. Attempt %d; the task is %s again.", d.ID, t.ID, t.Title, d.PaneID, d.Outcome, t.Attempts, t.Status)+dispatchWorkerMetadata(d), t.ID)
 	case store.DispatchCircuitBroken:
 		e.escalateLocked(d.RunID, fmt.Sprintf("task %s circuit broken", t.ID),
-			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID), t.ID)
+			fmt.Sprintf("Task %s (%s) failed %d times (last: %s on %s). It is now failed; reset with `horch task update --id %s --reset-attempts --status ready`.", t.ID, t.Title, t.Attempts, d.Outcome, d.PaneID, t.ID)+dispatchWorkerMetadata(d), t.ID)
 	}
 	e.badgeTask(d.PaneID, "")
 	e.recomputeWatch()

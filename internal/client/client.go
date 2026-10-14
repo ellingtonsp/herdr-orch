@@ -44,7 +44,7 @@ func New() (*Client, error) {
 // Idempotent ops can be re-sent safely when the connection drops mid-request: they only
 // read, or (check, ask's reply wait) are long polls whose effect is keyed by the caller.
 var idempotent = map[string]bool{
-	"ping": true, "check": true, "inbox": true, "board": true,
+	"ping": true, "check": true, "ack": true, "inbox": true, "board": true,
 	"run.current": true, "run.list": true, "run.show": true,
 	"task.list": true, "task.show": true, "dispatch.show": true, "gate.list": true,
 	"worker.show": true, "worker.list": true, "worker.read": true, "schedule.list": true,

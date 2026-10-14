@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Message delivery receipts.** Sends and replies wait for an interactive idle agent,
+  track submission separately from pickup, recover collapsed pastes, retry once and
+  escalate unconfirmed delivery. `send --wait-pickup [--timeout D]` waits for evidence;
+  `inbox` shows receipts. Queued jobs survive restarts; uncertain writes are escalated.
+- **Mailbox ownership.** A single-consumer lease refuses competing destructive checks
+  with the holder's identity. `check --peek` is non-destructive; new `ack --id` acknowledges
+  one recipient-owned message. Leases release on timeout, cancellation and disconnect.
+- **Completion reports.** Late `done --task` reports append notes to the latest closed
+  dispatch without changing its result. Report history is included in dispatch show.
+  Worker launch account/profile labels and requested model are persisted, snapshotted
+  per dispatch, preserved across restart replacements, and surfaced in completion notifications.
+  Messaging migrations retain existing dispatch holds and worker lifecycle records.
+
 - **Lifecycle integration.** Worktree-selected workers retain saved launch arguments for
   restart; PR watching and dispatch holds remain available together.
 - **Dispatch lifecycle:** `dispatch hold --until <RFC3339|duration|event:name> --reason ...`

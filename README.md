@@ -39,7 +39,8 @@ Running several agents in parallel breaks down in the same few places:
 
 ## Features
 
-- **Mailbox:** `send`, `check [--wait]`, blocking `ask` / `reply`, an inbox per pane, broadcast to a run.
+- **Mailbox:** readiness-aware `send [--wait-pickup]` and replies, delivery/pickup receipts,
+  one consuming `check --wait` per mailbox, `check --peek`, explicit `ack --id`, and run broadcasts.
 - **Tasks:** dependencies (`--deps a,b`) with automatic readiness, cycle detection, a circuit
   breaker after N failed attempts, optional auto-dispatch to idle workers.
 - **Tracked dispatch:** the task spec is wrapped with the exact `horch done` command the worker must
@@ -198,6 +199,23 @@ anything irreversible. Give me a short status after each step.
 reuses an available shell there, or creates a shell tab. Widget and busy panes are skipped.
 `--pane` requires an available shell with a workspace; a null workspace produces a clear
 error. `--cwd` retains the old behavior of creating a tab in the caller workspace.
+
+## Reliable messages
+
+`horch send --to worker-a --body "Review the updated tests." --wait-pickup` waits for
+confirmed pickup. Sends and replies wait for an interactive idle agent, preserve long
+prompts through the agent paste transport, retry once, and escalate unconfirmed delivery.
+`horch inbox` shows delivery and pickup status; `--json` includes timestamps and attempt counts.
+
+Keep one consuming `horch check --wait` loop per mailbox. A second consumer is refused
+with the holder's identity. Use `horch check --peek` for inspection and `horch ack --id m12`
+to acknowledge a specific message. Peek never consumes messages.
+
+A late `horch done --task t12 --body "Additional result"` is retained as a note attached to
+the latest closed dispatch, without changing its settlement. Worker launch account/profile
+labels and requested model are recorded and included in completion notifications.
+See [message delivery and acknowledgement](docs/messaging.md) for timing, retry behavior,
+receipt meanings, launch metadata flags and restart semantics.
 
 ## How settlement works
 
