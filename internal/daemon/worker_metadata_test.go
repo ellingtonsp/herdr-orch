@@ -23,6 +23,7 @@ func (h *metadataHerdr) AgentStart(ctx context.Context, name, kind, pane string,
 func TestWorkerLaunchMetadataPersistsAndAppearsInDoneMessages(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x)
+	x.h.addPane(coord, "", "idle", false)
 	h := &metadataHerdr{fakeHerdr: x.h}
 	x.e.h = h
 	args := []string{"--profile=profile-a", "--account", "account-a", "--model", "model-a"}
@@ -58,6 +59,7 @@ func TestWorkerLaunchMetadataPersistsAndAppearsInDoneMessages(t *testing.T) {
 func TestExplicitModelIsPassedToAgentAndMetadataLabelsAreRecorded(t *testing.T) {
 	x := newHarness(t)
 	setupRun(x)
+	x.h.addPane(coord, "", "idle", false)
 	h := &metadataHerdr{fakeHerdr: x.h}
 	x.e.h = h
 	var w store.Worker

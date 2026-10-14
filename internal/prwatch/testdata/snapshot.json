@@ -1,0 +1,43 @@
+{
+  "pull": {"data":{"repository":{"pullRequest":{"headRefOid":"current-head","baseRefName":"main","state":"OPEN","url":"https://github.com/you/myapp/pull/12","commits":{"nodes":[{"commit":{"pushedDate":"2026-01-01T00:00:00Z"}}]},"timelineItems":{"nodes":[{"__typename":"ReadyForReviewEvent","id":"ready-1","createdAt":"2026-01-01T00:00:01Z"}]}}}}},
+  "protection": {"required_status_checks":{"contexts":["build","legacy"],"checks":[{"context":"build","app_id":7}]}},
+  "branch": {"protected":true},
+  "rules": [[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"security","integration_id":9},{"context":"build","integration_id":7}]}}],[{"type":"pull_request","parameters":{}}]],
+  "runs": [
+    {"total_count":6,"workflow_runs":[
+      {"id":101,"workflow_id":10,"check_suite_id":501,"run_attempt":1,"head_sha":"current-head","status":"completed","conclusion":"cancelled"},
+      {"id":102,"workflow_id":10,"check_suite_id":502,"run_attempt":1,"head_sha":"current-head","status":"completed","conclusion":"failure"},
+      {"id":199,"workflow_id":10,"check_suite_id":599,"run_attempt":1,"head_sha":"old-head","status":"completed","conclusion":"failure"}
+    ]},
+    {"total_count":6,"workflow_runs":[
+      {"id":102,"workflow_id":10,"check_suite_id":502,"run_attempt":2,"head_sha":"current-head","status":"completed","conclusion":"success"},
+      {"id":201,"workflow_id":20,"check_suite_id":601,"run_attempt":1,"head_sha":"current-head","status":"completed","conclusion":"cancelled"},
+      {"id":202,"workflow_id":20,"check_suite_id":602,"run_attempt":1,"head_sha":"current-head","status":"completed","conclusion":"success"}
+    ]}
+  ],
+  "checks": [
+    {"total_count":10,"check_runs":[
+      {"id":1101,"name":"build","status":"completed","conclusion":"cancelled","app":{"id":7},"check_suite":{"id":501}},
+      {"id":1102,"name":"build","status":"completed","conclusion":"failure","app":{"id":7},"check_suite":{"id":502}},
+      {"id":1199,"name":"build","status":"completed","conclusion":"failure","app":{"id":7},"check_suite":{"id":599}},
+      {"id":1201,"name":"build","status":"completed","conclusion":"cancelled","app":{"id":7},"check_suite":{"id":601}},
+      {"id":2101,"name":"security","status":"completed","conclusion":"failure","app":{"id":9},"check_suite":{"id":701}}
+    ]},
+    {"total_count":10,"check_runs":[
+      {"id":1103,"name":"build","status":"completed","conclusion":"success","app":{"id":7},"check_suite":{"id":502}},
+      {"id":1104,"name":"analysis","status":"completed","conclusion":"failure","app":{"id":7},"check_suite":{"id":502}},
+      {"id":1203,"name":"build","status":"completed","conclusion":"success","app":{"id":7},"check_suite":{"id":602}},
+      {"id":2102,"name":"security","status":"completed","conclusion":"success","app":{"id":9},"check_suite":{"id":702},"html_url":"https://example.com/security/2102"},
+      {"id":2201,"name":"security","status":"completed","conclusion":"failure","app":{"id":8},"check_suite":{"id":703}}
+    ]}
+  ],
+  "jobs-102-2": [
+    {"total_count":2,"jobs":[{"id":3103,"name":"build","status":"completed","conclusion":"success","check_run_url":"https://api.github.com/repos/you/myapp/check-runs/1103","html_url":"https://github.com/you/myapp/actions/runs/102/job/3103"}]},
+    {"total_count":2,"jobs":[{"id":3104,"name":"analysis","status":"completed","conclusion":"failure","check_run_url":"https://api.github.com/repos/you/myapp/check-runs/1104"}]}
+  ],
+  "jobs-202-1": [{"total_count":1,"jobs":[{"id":3203,"name":"build","status":"completed","conclusion":"success","check_run_url":"https://api.github.com/repos/you/myapp/check-runs/1203"}]}],
+  "statuses": [
+    [{"id":4101,"context":"legacy","state":"failure","target_url":"https://example.com/legacy/4101"}],
+    [{"id":4102,"context":"legacy","state":"success","target_url":"https://example.com/legacy/4102"}]
+  ]
+}

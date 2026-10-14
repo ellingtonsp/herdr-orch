@@ -15,11 +15,19 @@ import (
 	"github.com/ellingtonsp/herdr-orch/internal/client"
 	"github.com/ellingtonsp/herdr-orch/internal/config"
 	"github.com/ellingtonsp/herdr-orch/internal/daemon"
+	"github.com/ellingtonsp/herdr-orch/internal/herdr"
 	"github.com/ellingtonsp/herdr-orch/internal/store"
 )
 
 // nopHerdr satisfies the engine's herdr side effects for plan ops (badges, notifications).
 type nopHerdr struct{ daemon.Herdr }
+
+// Mailbox CLI tests have a busy recipient; they consume through check rather
+// than starting a real agent delivery turn.
+func (nopHerdr) PaneGet(_ context.Context, pane string) (herdr.Pane, error) {
+	agent := "synthetic"
+	return herdr.Pane{PaneID: pane, WorkspaceID: "w1", Agent: &agent, AgentStatus: "working"}, nil
+}
 
 func (nopHerdr) PaneTokens(context.Context, string, map[string]*string) error { return nil }
 func (nopHerdr) Notify(context.Context, string, string, bool) error           { return nil }
@@ -56,7 +64,7 @@ func startDaemon(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go daemon.Serve(ctx, ln, e)
-	t.Cleanup(func() { cancel(); ln.Close(); st.Close(); os.Remove(c.Paths.Sock) })
+	t.Cleanup(func() { cancel(); ln.Close(); e.CloseDeliveries(); st.Close(); os.Remove(c.Paths.Sock) })
 }
 
 // horch runs one command line as caller and returns its stdout.

@@ -65,7 +65,7 @@ func inputServerReadiness(t *testing.T, status string, interactive, agentReady b
 						key = "agent"
 						ready = agentReady
 					}
-					result = map[string]any{key: map[string]any{"pane_id": "w1:p2", "agent": "codex", "agent_status": status, "interactive_ready": ready}}
+					result = map[string]any{key: map[string]any{"pane_id": "w1:p2", "workspace_id": "w1", "agent": "codex", "agent_status": status, "interactive_ready": ready}}
 				}
 				_ = json.NewEncoder(conn).Encode(map[string]any{"result": result})
 			}()

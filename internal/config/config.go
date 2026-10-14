@@ -90,9 +90,10 @@ type Slots struct {
 
 // Project describes one repo horch plans for. "<date>" in PlanPath/DayLogBranch is the plan day.
 type Project struct {
-	Repo         string `toml:"repo" json:"repo"` // owner/name
-	PlanPath     string `toml:"plan_path" json:"plan_path"`
-	DayLogBranch string `toml:"day_log_branch" json:"day_log_branch"`
+	RequiredChecks []string `toml:"required_checks" json:"required_checks,omitempty"` // nil: no fallback; []: explicitly none
+	Repo           string   `toml:"repo" json:"repo"`                                 // owner/name
+	PlanPath       string   `toml:"plan_path" json:"plan_path"`
+	DayLogBranch   string   `toml:"day_log_branch" json:"day_log_branch"`
 }
 
 // Integrations groups third-party settings.
@@ -231,6 +232,13 @@ func (c Config) Validate() error {
 	}
 	if err := ValidateWebListen(c.WebSettings().Listen); err != nil {
 		return err
+	}
+	for name, p := range c.Projects {
+		for _, check := range p.RequiredChecks {
+			if strings.TrimSpace(check) == "" {
+				return fmt.Errorf("projects.%s.required_checks: check names must not be empty", name)
+			}
+		}
 	}
 	roles := make([]string, 0, len(c.Agents))
 	for r := range c.Agents {

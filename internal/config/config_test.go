@@ -234,3 +234,24 @@ func TestWebIdentityHeaderValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestRequiredChecksFallback(t *testing.T) {
+	for _, tc := range []struct {
+		value            string
+		wantNil, wantErr bool
+	}{
+		{"", true, false}, {"required_checks = []", false, false}, {"required_checks = [\"test\", \"lint\"]", false, false}, {"required_checks = [\"\"]", false, true},
+	} {
+		p := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(p, []byte("[projects.myapp]\nrepo = \"you/myapp\"\n"+tc.value+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(p)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%s: %v", tc.value, err)
+		}
+		if err == nil && (c.Projects["myapp"].RequiredChecks == nil) != tc.wantNil {
+			t.Fatalf("fallback nil: %s", tc.value)
+		}
+	}
+}

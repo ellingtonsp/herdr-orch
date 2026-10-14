@@ -42,6 +42,8 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch dispatch nudge --task T [--text S] [--force]  (remind an idle worker to report)
   horch dispatch fail --task T --reason R            (coordinator declares it failed)
 
+  horch pr watch <n> [--until green|merged] [--repo owner/name] [--interval 15s] [--race-window 5s] [--run R]
+
   horch worker start --agent claude|pi|codex [--worktree DIR | --pane PANE] [--name N] [--account LABEL] [--profile LABEL] [--model ID] [-- agent args]
   horch worker register [--pane PANE] [--name N]
   horch worker show|read|stop|release|retain|abandon --worker PANE|NAME [--force] [--lines N] [--off]
@@ -207,6 +209,8 @@ func dispatch(ctx context.Context, args []string) error {
 			return cmdDispatchSub(ctx, sub, tail(rest))
 		}
 		return cmdDispatch(ctx, rest)
+	case "pr":
+		return cmdPR(ctx, sub, tail(rest))
 	case "worker":
 		return cmdWorker(ctx, sub, tail(rest))
 	case "gate":
@@ -646,8 +650,8 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	profile := f.String("profile", "", "")
 	model := f.String("model", "", "")
 	name := f.String("name", "", "")
-	cwd := f.String("worktree", "", "")
-	f.StringVar(cwd, "cwd", "", "")
+	worktree := f.String("worktree", "", "")
+	cwd := f.String("cwd", "", "")
 	pane := f.String("pane", "", "")
 	force := f.Bool("force", false, "")
 	lines := f.Int("lines", 0, "")
@@ -663,12 +667,12 @@ func cmdWorker(ctx context.Context, sub string, args []string) error {
 	ref := daemon.WorkerRef{Worker: *worker, Force: *force, Lines: *lines, Off: *off}
 	switch sub {
 	case "start":
-		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Args: extra, Pane: *pane, Account: *account, Profile: *profile, Model: *model}, printWorker)
+		return run(ctx, "worker.start", daemon.WorkerStartArgs{Run: *runID, Agent: *agent, Name: *name, Cwd: *cwd, Worktree: *worktree, Args: extra, Pane: *pane, Account: *account, Profile: *profile, Model: *model}, printWorker)
 	case "register":
 		if *pane == "" {
 			*pane = pos
 		}
-		return run(ctx, "worker.register", daemon.WorkerRegisterArgs{Run: *runID, Pane: *pane, Name: *name, Worktree: *cwd}, printWorker)
+		return run(ctx, "worker.register", daemon.WorkerRegisterArgs{Run: *runID, Pane: *pane, Name: *name, Worktree: firstNonempty(*worktree, *cwd)}, printWorker)
 	case "list", "":
 		return run(ctx, "worker.list", daemon.WorkerListArgs{Run: *runID, All: *all}, printWorkers)
 	case "read":
