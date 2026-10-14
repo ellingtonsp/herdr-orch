@@ -100,30 +100,11 @@ func (nativeProcesses) Inspect(ctx context.Context, pid int) (ProcessRecord, err
 	}
 	cwd, err := os.Readlink(filepath.Join(dir, "cwd"))
 	if err != nil {
-		return ProcessRecord{}, processFieldError(dir, "cwd", err)
+		return ProcessRecord{}, processFieldError(ctx, dir, "cwd", err)
 	}
 	command, err := os.Readlink(filepath.Join(dir, "exe"))
 	if err != nil {
-		return ProcessRecord{}, processFieldError(dir, "exe", err)
+		return ProcessRecord{}, processFieldError(ctx, dir, "exe", err)
 	}
 	return ProcessRecord{PID: pid, Parent: parent, Started: fields[19], Command: strings.TrimSuffix(command, " (deleted)"), Cwd: strings.TrimSuffix(cwd, " (deleted)")}, nil
-}
-
-func processFieldError(dir, field string, err error) error {
-	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		return os.ErrNotExist
-	}
-	if b, e := os.ReadFile(filepath.Join(dir, "stat")); os.IsNotExist(e) {
-		// It may disappear after the directory existence check above.
-		return os.ErrNotExist
-	} else if e == nil {
-		end := strings.LastIndexByte(string(b), ')')
-		if end >= 0 {
-			f := strings.Fields(string(b[end+1:]))
-			if len(f) > 0 && (f[0] == "Z" || f[0] == "X") {
-				return os.ErrNotExist
-			}
-		}
-	}
-	return fmt.Errorf("cannot inspect process %s: %v", field, err)
 }
