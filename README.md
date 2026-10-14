@@ -49,6 +49,9 @@ Running several agents in parallel breaks down in the same few places:
   gate popup.
 - **Workers:** start claude / codex / pi / any herdr agent kind in a new tab or an existing pane,
   read their screen, stop, release, retain, or abandon them.
+- **PR CI watch:** `horch pr watch 12 --repo you/myapp [--until green|merged]` follows the
+  current head, ignores superseded workflow attempts, and sends required CI/queue/merge
+  transitions to the coordinator inbox. See [PR watch](docs/pr-watch.md).
 - **Schedules:** cron-style actions run by the daemon (`horch` commands or agent prompts).
 - **Board pane:** runs → tasks → workers → gates → inbox, live.
 - **Pane metadata:** each worker's current task and unread count are reported to herdr as pane
@@ -61,6 +64,7 @@ Running several agents in parallel breaks down in the same few places:
 - **Go 1.26+** only to build from source. `herdr plugin install` downloads prebuilt binaries when a
   release matches.
 - `git` for the unsaved-work check on release.
+- Authenticated `gh` for `horch pr watch`.
 
 ## Install
 
@@ -168,7 +172,7 @@ Repository: <path>   Base branch: <main>   Max parallel workers: <2>
    `--deps` for ordering). Show me the list and wait for my OK before dispatching anything.
 3. Dispatch each ready task:
    - `herdr worktree create --cwd <repo> --branch <branch> --base <main> --no-focus`
-   - `horch worker start --agent <claude|codex> --pane <root pane> --name <task>-1`
+   - `horch worker start --agent <claude|codex> --worktree <path> --name <task>-1`
    - `horch dispatch --task <id> --to <name>`
    Spec headings: Target / Change / Constraints / Ownership / Observable acceptance. Ask the
    worker to report with `horch done` and a short JSON body: outcome, PR, artifact, summary.
@@ -188,6 +192,11 @@ Repository: <path>   Base branch: <main>   Max parallel workers: <2>
 Rules: never merge, never push to <main>, never touch secrets or production. Ask me before
 anything irreversible. Give me a short status after each step.
 ```
+
+`worker start --worktree <path>` finds the worktree workspace (opening it if needed),
+reuses an available shell there, or creates a shell tab. Widget and busy panes are skipped.
+`--pane` requires an available shell with a workspace; a null workspace produces a clear
+error. `--cwd` retains the old behavior of creating a tab in the caller workspace.
 
 ## How settlement works
 

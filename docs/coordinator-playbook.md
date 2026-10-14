@@ -125,7 +125,8 @@ Decide them up front and write them into the skill:
 ## 10. One worktree per worker, provisioned before dispatch
 
 - `herdr worktree create --cwd <repo> --branch <branch> --base <base> --no-focus`, then
-  `horch worker start --pane <root pane>` so the worker lives in that worktree's workspace.
+  `horch worker start --worktree <path>` so the worker finds or creates a shell in that
+  worktree's workspace, even when its root pane is a widget.
 - Run a provisioning script on the worktree before the worker starts: dependencies, env files,
   per-worktree database and ports, git hooks. Refuse to dispatch if it reports an unhealthy
   dependency store. A worker that spends its first 20 minutes fixing its environment is a lost
@@ -135,17 +136,18 @@ Decide them up front and write them into the skill:
 
 ## 11. Feed CI and other signals into the inbox
 
-The coordinator should not poll CI either. Run a small watcher, as a `horch schedule` or a
-background script, that reports into the same inbox:
+Run the native foreground watcher in a supervised shell:
 
-```bash
-horch send --as ci-watch --to coordinator --kind escalation \
-  --subject "PR #42 CI failed @<sha>" --body "<failing job> <url>"
-horch send --as ci-watch --to coordinator --kind note --subject "PR #42 CI green" --body "head <sha>"
+```sh
+horch pr watch 12 --repo you/myapp --until merged --run r1
 ```
 
-The same pattern works for deploy status, review-bot comments, or anything else the coordinator
-should react to. Red CI goes to the PR's owning worker (section 5), not to a fresh worker.
+It sends required CI results, queue removals and merges to that run's coordinator inbox.
+Superseded workflow attempts are ignored, and a possible push/ready race is warned about.
+Use `--until green` to stop after required CI passes (or fails). See [PR watch](pr-watch.md)
+for fallback configuration, timing, exit behavior and evidence limits. Red required CI goes
+to the PR's owning worker (section 5), not to a fresh worker. Continue to use `horch send`
+for other external signals the coordinator should react to.
 
 ## 12. A lessons file
 
