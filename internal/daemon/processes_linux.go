@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 func (h nativeProcesses) List(ctx context.Context) ([]ProcessRecord, error) {
@@ -43,6 +44,23 @@ func (h nativeProcesses) List(ctx context.Context) ([]ProcessRecord, error) {
 			return nil, err
 		}
 		if !inspectableCredentials(target, caller) {
+			continue
+		}
+		// Linux makes sensitive proc entries root-owned for nondumpable
+		// processes, even when their status still lists our UID. These are a
+		// separate security boundary, not an incomplete ordinary-user scan.
+		meta, err := os.Lstat(filepath.Join("/proc", entry.Name(), "cwd"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		owner, ok := meta.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil, fmt.Errorf("cannot inspect process credentials for %d", pid)
+		}
+		if uint64(owner.Uid) != caller.UIDs[3] || uint64(owner.Gid) != caller.GIDs[3] {
 			continue
 		}
 		p, err := h.Inspect(ctx, pid)
@@ -95,7 +113,10 @@ func processFieldError(dir, field string, err error) error {
 	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
 		return os.ErrNotExist
 	}
-	if b, e := os.ReadFile(filepath.Join(dir, "stat")); e == nil {
+	if b, e := os.ReadFile(filepath.Join(dir, "stat")); os.IsNotExist(e) {
+		// It may disappear after the directory existence check above.
+		return os.ErrNotExist
+	} else if e == nil {
 		end := strings.LastIndexByte(string(b), ')')
 		if end >= 0 {
 			f := strings.Fields(string(b[end+1:]))

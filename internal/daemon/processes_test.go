@@ -564,3 +564,32 @@ func TestRestartRetainsResourceLease(t *testing.T) {
 		t.Fatalf("restart lease %+v %v", leases, err)
 	}
 }
+
+func TestReleaseDoesNotMistakeNewInspectionBoundaryForExit(t *testing.T) {
+	x := newHarness(t)
+	setupRun(x, "w1:p2")
+	root, _ := processRoot(t.TempDir())
+	w, _ := x.st.GetWorker("w1:p2")
+	w.Worktree = root
+	x.st.RegisterWorker(w)
+	if _, err := x.st.AcquireLease("db:acme", w.PaneID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	p := ProcessRecord{PID: 100001, Started: "1", Cwd: root, Command: "helper"}
+	f := &fakeProcesses{ps: []ProcessRecord{p}}
+	f.onSignal = func(int, syscall.Signal) { f.ps = nil }
+	f.inspect = func(int) (ProcessRecord, error) {
+		if len(f.signals) > 0 {
+			return ProcessRecord{}, os.ErrPermission
+		}
+		return p, nil
+	}
+	x.e.processes = f
+	x.e.processGrace = time.Millisecond
+	_, err := x.op(coord, "worker.release", WorkerRef{Worker: w.PaneID})
+	wantRefusal(t, err, "release_failed")
+	leases, err := x.st.ListLeases()
+	if err != nil || len(leases) != 1 || len(f.signals) != 1 || f.signals[0] != syscall.SIGTERM {
+		t.Fatalf("lost responsibility for hidden survivor: leases=%+v signals=%+v err=%v", leases, f.signals, err)
+	}
+}

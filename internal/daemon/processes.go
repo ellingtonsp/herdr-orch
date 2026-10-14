@@ -361,8 +361,13 @@ func (e *Engine) cleanProcessScope(ctx context.Context, root string, ps []Proces
 		for i := range out {
 			r := &out[i]
 			if _, ok := live[key(r.ProcessRecord)]; !ok && (r.Action == "unverified" || r.Action == "term" || r.Action == "kill") {
-				r.Action = "exited"
-				r.Error = ""
+				// An inventory may omit a process that crossed an inspection
+				// security boundary. Absence alone does not prove its exit.
+				current, inspectErr := e.processHost().Inspect(ctx, r.PID)
+				if os.IsNotExist(inspectErr) || (inspectErr == nil && current.Started != r.Started) {
+					r.Action = "exited"
+					r.Error = ""
+				}
 			}
 		}
 		todo := map[string]bool{}
