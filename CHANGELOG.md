@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Lifecycle integration.** Worktree-selected workers retain saved launch arguments for
+  restart; PR watching and dispatch holds remain available together.
 - **Dispatch lifecycle:** `dispatch hold --until <RFC3339|duration|event:name> --reason ...`
   and `dispatch resume` persist intentional waits. Usage-cap screens raise one escalation
   and auto-hold until reset (explicit resume when unknown). `dispatch fail --infra` refunds
@@ -10,6 +12,13 @@
   agent exit and shell environment before relaunching with saved arguments and re-dispatching
   the same task without another attempt. `worker release --hand-off-to W` records a transfer
   to a live owner in the same worktree, allowing unsaved helper work without `--force`.
+- **Native PR watch.** `horch pr watch <n> [--until green|merged] [--repo owner/name]`
+  reports required CI, queue removals and merges to the coordinator inbox, selects latest
+  same-head workflow attempts, warns about push/ready races, and supports per-project
+  `required_checks` fallbacks when branch policy discovery is unavailable.
+- **Worktree shells.** `worker start --worktree` finds or creates an available shell in
+  the worktree workspace, skipping widgets and busy panes. Missing pane workspace IDs
+  now fail clearly. `--cwd` preserves caller-workspace tab creation.
 
 - **Day-plan store.** `horch plan import|show|item add|update|move|hold|release|remove|transition|events|export|status`.
   The published `<date>.plan.md` is imported into SQLite (migration 3), and every mid-day change

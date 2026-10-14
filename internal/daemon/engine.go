@@ -30,6 +30,7 @@ type Herdr interface {
 	PaneClose(ctx context.Context, paneID string) error
 	PaneRead(ctx context.Context, paneID string, lines int) (string, error)
 	NewTab(ctx context.Context, workspaceID, cwd, label string, env map[string]string) (herdr.Pane, error)
+	WorktreePane(ctx context.Context, cwd, label string, env map[string]string) (herdr.Pane, bool, error)
 	AgentStart(ctx context.Context, name, kind, paneID string, args []string) (herdr.Pane, error)
 }
 

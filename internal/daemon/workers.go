@@ -21,11 +21,14 @@ import (
 )
 
 type WorkerStartArgs struct {
-	Run   string   `json:"run,omitempty"`
-	Agent string   `json:"agent"`
-	Name  string   `json:"name,omitempty"`
-	Cwd   string   `json:"cwd,omitempty"`
-	Args  []string `json:"args,omitempty"`
+	Run   string `json:"run,omitempty"`
+	Agent string `json:"agent"`
+	Name  string `json:"name,omitempty"`
+	// Cwd preserves the legacy new-tab-in-caller-workspace behavior.
+	Cwd string `json:"cwd,omitempty"`
+	// Worktree finds or opens the checkout's own workspace and selects a shell there.
+	Worktree string   `json:"worktree,omitempty"`
+	Args     []string `json:"args,omitempty"`
 	// Pane starts the agent in an existing shell pane (e.g. the root pane of a workspace
 	// made by `herdr worktree create`) instead of opening a new tab.
 	Pane string `json:"pane,omitempty"`
@@ -41,9 +44,9 @@ func (e *Engine) opWorkerStart(ctx context.Context, caller string, raw json.RawM
 	return e.startWorker(ctx, caller, a)
 }
 
-// startWorker opens a new tab in the caller's workspace, starts the agent there and
-// registers it. An agent that comes up blocked (e.g. a folder-trust prompt) is registered
-// and escalated; it is never answered automatically.
+// startWorker selects a shell in the requested worktree workspace, adopts an explicit
+// pane, or opens a tab in the caller's workspace. An agent that comes up blocked
+// (e.g. a folder-trust prompt) is registered and escalated, never answered automatically.
 func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartArgs) (store.Worker, error) {
 	if a.Agent == "" {
 		return store.Worker{}, refusal("bad_args", "--agent is required (claude|pi|codex|...)")
@@ -51,6 +54,12 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	run, err := e.runFor(caller, a.Run)
 	if err != nil {
 		return store.Worker{}, err
+	}
+	if a.Worktree != "" {
+		if a.Cwd != "" || a.Pane != "" {
+			return store.Worker{}, refusal("bad_args", "--worktree cannot be combined with --cwd or --pane")
+		}
+		a.Cwd = a.Worktree
 	}
 	if a.Cwd != "" {
 		abs, err := filepath.Abs(a.Cwd)
@@ -76,8 +85,15 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 		if err != nil {
 			return store.Worker{}, refusal("unknown_pane", "pane %s: %v", a.Pane, err)
 		}
+		if p.WorkspaceID == "" {
+			return store.Worker{}, refusal("unknown_pane", "pane %s has no workspace; choose a shell pane in a workspace", a.Pane)
+		}
 		if p.Agent != nil && *p.Agent != "" {
 			return store.Worker{}, refusal("pane_busy", "pane %s already runs %s", a.Pane, *p.Agent)
+		}
+		info, err := e.h.ProcessInfo(ctx, a.Pane)
+		if err != nil || !info.AvailableShell() {
+			return store.Worker{}, refusal("pane_busy", "pane %s is not an available shell", a.Pane)
 		}
 		if a.Cwd == "" && p.Cwd != nil {
 			a.Cwd = *p.Cwd
@@ -85,9 +101,14 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 		pane = p
 	} else {
 		ws := ""
-		if isPane(caller) {
+		if isPane(caller) && a.Worktree == "" {
 			if p, err := e.h.PaneGet(ctx, caller); err == nil {
+				if p.WorkspaceID == "" {
+					return store.Worker{}, refusal("unknown_pane", "caller pane %s has no workspace", caller)
+				}
 				ws = p.WorkspaceID
+			} else {
+				return store.Worker{}, refusal("unknown_pane", "caller pane %s: %v", caller, err)
 			}
 		}
 		var env map[string]string
@@ -96,8 +117,17 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 			env = map[string]string{"PATH": filepath.Dir(e.cfg.HorchBin) + ":" + os.Getenv("PATH")}
 		}
 		var err error
-		pane, err = e.h.NewTab(ctx, ws, a.Cwd, a.Name, env)
+		if a.Worktree != "" {
+			pane, ownPane, err = e.h.WorktreePane(ctx, a.Cwd, a.Name, env)
+		} else {
+			pane, err = e.h.NewTab(ctx, ws, a.Cwd, a.Name, env)
+		}
 		if err != nil {
+			if ownPane && pane.PaneID != "" {
+				cctx, cancel := bg()
+				_ = e.h.PaneClose(cctx, pane.PaneID)
+				cancel()
+			}
 			return store.Worker{}, fmt.Errorf("create tab: %w", err)
 		}
 	}

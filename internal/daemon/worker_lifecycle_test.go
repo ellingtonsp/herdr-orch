@@ -97,6 +97,7 @@ func (f *restartFake) AgentPrompt(ctx context.Context, pane, text string) error 
 func restartHarness(t *testing.T) (*harness, *restartFake, store.Worker, store.Task, store.Dispatch) {
 	x := newHarness(t)
 	r := setupRun(x)
+	x.h.addPane(coord, "codex", "idle", true)
 	args := []string{"--model", "acme-test-model", "--reasoning", "high"}
 	var w store.Worker
 	x.mustOp(coord, "worker.start", WorkerStartArgs{Run: r.ID, Agent: "codex", Name: "acme-worker", Args: args}, &w)
