@@ -402,7 +402,7 @@ func TestPlanMigrationPreservesExistingLiveDatabase(t *testing.T) {
 					t.Fatalf("message changed: %q %v", body, err)
 				}
 				var count, latest int
-				if err := s.db.QueryRow(`SELECT COUNT(*),MAX(v) FROM schema_version`).Scan(&count, &latest); err != nil || count != 4 || latest != 4 {
+				if err := s.db.QueryRow(`SELECT COUNT(*),MAX(v) FROM schema_version`).Scan(&count, &latest); err != nil || count != len(migrations) || latest != len(migrations) {
 					t.Fatalf("migration versions: count=%d latest=%d err=%v", count, latest, err)
 				}
 				if version == 3 {

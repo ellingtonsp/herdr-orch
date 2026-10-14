@@ -5,6 +5,14 @@ import (
 )
 
 type Dispatch struct {
+	UsageCapUntil       int64  `json:"usage_cap_until,omitempty"`
+	UsageCapUnknown     bool   `json:"usage_cap_unknown,omitempty"`
+	HoldUntil           int64  `json:"hold_until,omitempty"`
+	HoldEvent           string `json:"hold_event,omitempty"`
+	HoldReason          string `json:"hold_reason,omitempty"`
+	HeldBy              string `json:"held_by,omitempty"`
+	MonitorAfter        int64  `json:"monitor_after,omitempty"`
+	UsageCapNotice      string `json:"usage_cap_notice,omitempty"`
 	ID                  string `json:"id"`
 	TaskID              string `json:"task_id"`
 	RunID               string `json:"run_id"`
@@ -29,11 +37,11 @@ func (d Dispatch) Active() bool {
 	return d.Status == DispatchPending || d.Status == DispatchDispatched
 }
 
-const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,'')`
+const dispCols = `id,task_id,run_id,pane_id,COALESCE(agent,''),COALESCE(prompt_hash,''),status,saw_working,COALESCE(done_message_id,''),COALESCE(done_outcome,''),COALESCE(idle_since,0),unobserved_escalated,idle_escalated,nudges,started_at,COALESCE(settled_at,0),COALESCE(outcome,''),hold_until,hold_event,hold_reason,held_by,monitor_after,usage_cap_notice,usage_cap_until,usage_cap_unknown`
 
 func scanDisp(r interface{ Scan(...any) error }) (Dispatch, error) {
 	var d Dispatch
-	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome)
+	err := r.Scan(&d.ID, &d.TaskID, &d.RunID, &d.PaneID, &d.Agent, &d.PromptHash, &d.Status, &d.SawWorking, &d.DoneMessageID, &d.DoneOutcome, &d.IdleSince, &d.UnobservedEscalated, &d.IdleEscalated, &d.Nudges, &d.StartedAt, &d.SettledAt, &d.Outcome, &d.HoldUntil, &d.HoldEvent, &d.HoldReason, &d.HeldBy, &d.MonitorAfter, &d.UsageCapNotice, &d.UsageCapUntil, &d.UsageCapUnknown)
 	return d, err
 }
 
@@ -284,4 +292,77 @@ func (s *Store) LastSettledForPane(pane string) (int64, error) {
 	var t int64
 	err := s.db.QueryRow(`SELECT COALESCE(MAX(settled_at),0) FROM dispatches WHERE pane_id=?`, pane).Scan(&t)
 	return t, err
+}
+
+// Held reports an unexpired timed hold or an explicitly resumed event hold.
+func (d Dispatch) Held(now int64) bool {
+	return d.HoldEvent != "" || d.HoldUntil > now
+}
+
+// HoldDispatch preserves the active claim while suppressing supervision reminders.
+func (s *Store) HoldDispatch(id string, until int64, event, reason, actor string) (Dispatch, error) {
+	if (until <= s.now() && event == "") || (until != 0 && event != "") || reason == "" {
+		return Dispatch{}, refuse("bad_args", "hold requires a future deadline or event, and a reason")
+	}
+	res, err := s.db.Exec(`UPDATE dispatches SET hold_until=?,hold_event=?,hold_reason=?,held_by=? WHERE id=? AND status IN (?,?)`, until, event, reason, actor, id, DispatchPending, DispatchDispatched)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Dispatch{}, refuse("no_active_dispatch", "dispatch %s is not active", id)
+	}
+	return s.GetDispatch(id)
+}
+
+// ResumeDispatch starts a fresh supervision grace period, without changing attempt history.
+func (s *Store) ResumeDispatch(id string) (Dispatch, error) {
+	now := s.now()
+	res, err := s.db.Exec(`UPDATE dispatches SET hold_until=0,hold_event='',hold_reason='',held_by='',usage_cap_until=0,usage_cap_unknown=0,idle_since=?,idle_escalated=0,unobserved_escalated=0,monitor_after=? WHERE id=? AND status IN (?,?)`, now, now, id, DispatchPending, DispatchDispatched)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Dispatch{}, refuse("no_active_dispatch", "dispatch %s is not active", id)
+	}
+	return s.GetDispatch(id)
+}
+
+func (s *Store) SetUsageCapNotice(id, notice string) error {
+	_, err := s.db.Exec(`UPDATE dispatches SET usage_cap_notice=? WHERE id=?`, notice, id)
+	return err
+}
+
+// RecordUsageCap commits the cap, automatic hold and its single escalation together.
+// An existing coordinator hold is retained; cap metadata survives its earlier expiry.
+func (s *Store) RecordUsageCap(id, notice string, until int64, unknown bool, m Message) (Dispatch, error) {
+	err := s.tx(func(tx *sql.Tx) error {
+		d, err := scanDisp(tx.QueryRow(`SELECT `+dispCols+` FROM dispatches WHERE id=?`, id))
+		if err != nil {
+			return err
+		}
+		if !d.Active() {
+			return refuse("no_active_dispatch", "dispatch is not active")
+		}
+		if d.UsageCapNotice == notice {
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE dispatches SET usage_cap_notice=?,usage_cap_until=?,usage_cap_unknown=? WHERE id=?`, notice, until, unknown, id); err != nil {
+			return err
+		}
+		if !d.Held(s.now()) {
+			event := ""
+			if unknown {
+				event = "usage-reset"
+			}
+			if _, err := tx.Exec(`UPDATE dispatches SET hold_until=?,hold_event=?,hold_reason='agent usage cap',held_by=? WHERE id=?`, until, event, Daemon, id); err != nil {
+				return err
+			}
+		}
+		_, err = insertMessage(tx, m, s.now())
+		return err
+	})
+	if err != nil {
+		return Dispatch{}, err
+	}
+	return s.GetDispatch(id)
 }
