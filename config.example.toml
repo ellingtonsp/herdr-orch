@@ -9,6 +9,11 @@
 # Project used when a command does not name one. Must exist under [projects].
 default_project = "myapp"
 
+# Queued steering (default off): workers started with `horch worker start --agent claude`
+# get a Claude Code hook that delivers `horch send --kind steer` notes at their next turn
+# boundary. Must stay above the [tables]. Codex and other agents fall back to idle delivery.
+# steering = true
+
 [owner]
 # Plan edits made as this principal (HORCH_PRINCIPAL / --principal, or a terminal outside
 # herdr) count as the owner's approval. Orchestrator and worker writes never do.

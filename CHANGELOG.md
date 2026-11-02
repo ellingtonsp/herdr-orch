@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Queued steering.** `horch send --kind steer` queues a note for a busy worker without
+  waiting for idle. With `steering = true` (default off), Claude workers started by
+  `horch worker start` run `horch hook claude-steer` on `PostToolUse` and `UserPromptSubmit`,
+  which injects pending notes as additional context at the next turn boundary. Receipts
+  move `queued → injected → acknowledged`, exactly once in order, with re-injection when
+  never acknowledged. Codex and other agents keep idle delivery.
+
 - **Cleanup scope safety.** Sweep defaults to no candidates outside recorded released
   linked Git worktrees. Exact Git root and administration-backlink proof is required
   before each signal. Main checkouts, ordinary directories and missing roots are skipped

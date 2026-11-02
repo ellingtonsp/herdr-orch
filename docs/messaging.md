@@ -49,6 +49,53 @@ Replies use the same receipts. A reply consumed by a still-running `horch ask` i
 read and does not need terminal input. If the original ask has ended, the reply remains in
 the mailbox and is delivered when the agent becomes ready.
 
+## Queued steering
+
+`horch send --kind steer` queues a note for a worker that is in the middle of a task. It does
+not wait for the agent to be idle and is never typed into the terminal; the worker's own
+hook delivers it at the next turn boundary.
+
+```sh
+horch send --to worker-a --kind steer --subject "scope" --body "Skip the flaky test; note it in your report."
+horch inbox
+```
+
+| Receipt | Meaning |
+|---|---|
+| `queued` | Stored; waiting for the worker's next hook call. |
+| `injected` | The hook printed it to the model (`injected_at`, `inject_count`). |
+| `acknowledged` | A later hook call confirmed the earlier print succeeded (`acked_at`). |
+
+`--wait-pickup` is refused for steering and recipients must be panes or worker names.
+Steer notes are not part of the consuming mailbox: `check`, `ack` and unread badges ignore them.
+
+**Opt in** with `steering = true` in `~/.config/horch/config.toml` (default off, so nothing
+changes for existing users). `horch worker start --agent claude` then writes
+`<state>/steer/claude-steer.json` and launches Claude Code with `--settings` pointing at it,
+unless you already pass your own `--settings`. The file registers `horch hook claude-steer`
+on two Claude Code hooks:
+
+- `PostToolUse` runs after every tool call, so a long turn picks up a note within one tool call.
+- `UserPromptSubmit` covers the start of a turn (a worker that was idle or just got a prompt).
+
+Both accept JSON `hookSpecificOutput.additionalContext`, which Claude Code adds to the model's
+context as hook-provided context rather than as a user message. (Plain stdout is only
+context for `UserPromptSubmit`, and `PostToolUse` stdout is not shown to the model, so the hook
+always emits the JSON form.) The note is framed as an orchestrator note with each id and subject.
+The hook identifies the worker through `HORCH_AS` or `HERDR_PANE_ID` and never fails or blocks
+the agent: if the daemon is down it prints nothing and exits 0.
+
+Delivery is exactly once in order in the normal path. The daemon marks notes `injected` on
+pull; the hook records the printed ids in `<state>/steer/<pane>.state` (under a file lock, so
+concurrent hooks serialize) and sends them back as acknowledgements on its next call. A failed
+print releases the notes to `queued`. A hook that dies after the pull but before recording
+re-injects the unacknowledged notes, so a crash can duplicate a note but never lose one.
+
+Workers that were started without the hook, and every non-Claude agent (Codex is unsupported
+for steering), fall back to today's behavior: the note is sent as an ordinary `note` with a
+`steer:` subject and waits for the agent to be idle. Restarted workers keep the hook because
+`--settings` is part of their saved launch arguments.
+
 ## One consumer per mailbox
 
 A destructive `check --wait` holds a daemon lease for its recipient mailbox until the RPC

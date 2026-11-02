@@ -144,6 +144,15 @@ func printMessages(raw json.RawMessage) {
 				head += " (" + m.PickupVia + ")"
 			}
 		}
+		if m.Kind == store.KindSteer && m.InjectedAt != 0 {
+			head += " · injected " + ago(m.InjectedAt) + " ago"
+			if m.InjectCount > 1 {
+				head += fmt.Sprintf(" (x%d)", m.InjectCount)
+			}
+			if m.AckedAt != 0 {
+				head += " · acknowledged " + ago(m.AckedAt) + " ago"
+			}
+		}
 		head += " · " + ago(m.CreatedAt) + " ago"
 		fmt.Println(head)
 		if m.DeliveryError != "" {

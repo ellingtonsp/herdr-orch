@@ -33,6 +33,9 @@ type Config struct {
 	Slots          Slots              `toml:"slots" json:"slots"`
 	Projects       map[string]Project `toml:"projects" json:"projects"`
 	Integrations   Integrations       `toml:"integrations" json:"integrations"`
+	// Steering installs the queued-steering hook into workers started with --agent claude.
+	// Default off.
+	Steering bool `toml:"steering" json:"steering"`
 }
 
 // Web holds listener preferences; identity is supplied by a trusted tailnet proxy.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"syscall"
 	"time"
@@ -71,6 +72,7 @@ func Run(ctx context.Context, o Options) error {
 
 	cfg := o.Config
 	cfg.ArchiveDir = p.Archive
+	cfg.SteerDir = filepath.Join(p.Dir, "steer")
 	cfg.HerdrSock = p.HerdrSock
 	e := NewEngine(st, hc, cfg)
 	e.logf = logf

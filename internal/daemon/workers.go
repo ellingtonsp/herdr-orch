@@ -201,6 +201,7 @@ func (e *Engine) startWorker(ctx context.Context, caller string, a WorkerStartAr
 	}
 	// A fresh tab's shell is still starting (profile, prompt) for a moment; herdr
 	// refuses to launch into it until it is an available shell.
+	a.Args = e.installSteering(a.Agent, a.Args)
 	var ag herdr.Pane
 	var startErr error
 	for i := 0; i < 40; i++ {

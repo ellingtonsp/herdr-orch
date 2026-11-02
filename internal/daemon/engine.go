@@ -49,6 +49,8 @@ type Config struct {
 	BlockedAfter time.Duration
 	// ArchiveDir receives pane transcripts on release.
 	ArchiveDir string
+	// SteerDir holds the generated Claude Code hook settings used for queued steering.
+	SteerDir string
 	// HorchBin is the horch binary used by scheduled `horch` actions and named in prompts.
 	HorchBin string
 	// HerdrSock is the herdr session socket, pinned in worker prompts.

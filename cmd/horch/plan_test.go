@@ -33,7 +33,7 @@ func (nopHerdr) PaneTokens(context.Context, string, map[string]*string) error { 
 func (nopHerdr) Notify(context.Context, string, string, bool) error           { return nil }
 
 // startDaemon serves a real engine on the socket horch resolves for a throwaway session.
-func startDaemon(t *testing.T) {
+func startDaemon(t *testing.T) *store.Store {
 	t.Helper()
 	dir := t.TempDir()
 	for _, k := range []string{"HERDR_PLUGIN_STATE_DIR", "HERDR_SESSION", "HORCH_AS", "HERDR_PANE_ID", "HORCH_PRINCIPAL"} {
@@ -53,6 +53,7 @@ func startDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := daemon.DefaultConfig()
+	cfg.SteerDir = filepath.Join(c.Paths.Dir, "steer")
 	cfg.UserConfig = func() (config.Config, error) {
 		return config.Config{Owner: config.Owner{Principal: "alice"}, DefaultProject: "acme"}, nil
 	}
@@ -65,6 +66,7 @@ func startDaemon(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go daemon.Serve(ctx, ln, e)
 	t.Cleanup(func() { cancel(); ln.Close(); e.CloseDeliveries(); st.Close(); os.Remove(c.Paths.Sock) })
+	return st
 }
 
 // horch runs one command line as caller and returns its stdout.
