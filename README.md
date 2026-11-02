@@ -207,6 +207,12 @@ confirmed pickup. Sends and replies wait for an interactive idle agent, preserve
 prompts through the agent paste transport, retry once, and escalate unconfirmed delivery.
 `horch inbox` shows delivery and pickup status; `--json` includes timestamps and attempt counts.
 
+To steer a worker that is busy, set `steering = true` in the config and start Claude workers
+as usual, then `horch send --to worker-a --kind steer --body "Skip the flaky test"`. The note
+is queued without waiting for idle and injected as orchestrator context at the worker's next
+tool-call or prompt boundary; `horch inbox` shows `queued → injected → acknowledged`. Codex
+and other agents fall back to idle delivery. See [docs/messaging.md](docs/messaging.md).
+
 Keep one consuming `horch check --wait` loop per mailbox. A second consumer is refused
 with the holder's identity. Use `horch check --peek` for inspection and `horch ack --id m12`
 to acknowledge a specific message. Peek never consumes messages.

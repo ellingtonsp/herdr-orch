@@ -54,6 +54,7 @@ const (
 	KindReply      = "reply"
 	KindDone       = "done"
 	KindEscalation = "escalation"
+	KindSteer      = "steer"
 )
 
 // Daemon is the pseudo-pane id for messages to and from herdr-orch itself.
@@ -240,6 +241,10 @@ var migrations = []string{
 	// 9: optional per-run dispatch admission (host leases live in their registry).
 	`ALTER TABLE runs ADD COLUMN max_load REAL NOT NULL DEFAULT 0;
  ALTER TABLE runs ADD COLUMN min_free_mem REAL NOT NULL DEFAULT 0;`,
+	// 10: queued steering receipts (queued -> injected -> acknowledged).
+	`ALTER TABLE messages ADD COLUMN injected_at INTEGER;
+ ALTER TABLE messages ADD COLUMN acked_at INTEGER;
+ ALTER TABLE messages ADD COLUMN inject_count INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func (s *Store) migrate() error {

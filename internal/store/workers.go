@@ -140,9 +140,16 @@ func (s *Store) SetWorkerState(pane, state, note, archive string) error {
 	case WorkerReleased, WorkerStopped, WorkerAbandoned, WorkerExited:
 		released = now
 	}
-	_, err := s.db.Exec(`UPDATE workers SET state=?, note=COALESCE(?,note), archive_path=COALESCE(?,archive_path), released_at=COALESCE(?,released_at), lifecycle=CASE WHEN ? IS NOT NULL THEN '' ELSE lifecycle END WHERE pane_id=?`,
-		state, nullStr(note), nullStr(archive), released, released, pane)
-	return err
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE workers SET state=?, note=COALESCE(?,note), archive_path=COALESCE(?,archive_path), released_at=COALESCE(?,released_at), lifecycle=CASE WHEN ? IS NOT NULL THEN '' ELSE lifecycle END WHERE pane_id=?`,
+			state, nullStr(note), nullStr(archive), released, released, pane); err != nil {
+			return err
+		}
+		if released != nil {
+			return expireSteer(tx, pane)
+		}
+		return nil
+	})
 }
 
 func (s *Store) SetRetained(pane string, retained bool) error {

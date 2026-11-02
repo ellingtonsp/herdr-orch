@@ -29,9 +29,10 @@ const usage = `horch — herdr orchestration (mailbox, tasks, dispatch, gates, w
   horch run update [--run R] [--status S] [--coordinator me|PANE] [--auto on|off] [--max-attempts N]
                    [--idle-report 10m] [--flag-idle 30m|0] [--max-load N] [--min-free-mem PCT]
 
-  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation] [--wait-pickup] [--timeout 5m]
+  horch send --to coordinator|run|human|PANE|NAME [--subject S] --body B [--kind note|question|escalation|steer] [--wait-pickup] [--timeout 5m]
   horch done [--task T] --body B [--failed]          (report a dispatched task finished)
   horch check [--wait] [--timeout 10m] [--peek]      horch inbox [--all] [--limit N]
+  horch hook claude-steer   (Claude Code PostToolUse/UserPromptSubmit hook; prints queued steer notes)
   horch ask [--to coordinator] --question Q [--timeout 30m]   (blocks until replied)
   horch reply --id MSG --body B                   horch ack --id MSG
 
@@ -200,6 +201,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return cmdSweep(ctx, rest)
 	case "run":
 		return cmdRun(ctx, sub, tail(rest))
+	case "hook":
+		return cmdHook(ctx, sub, tail(rest))
 	case "send":
 		return cmdSend(ctx, rest)
 	case "done":

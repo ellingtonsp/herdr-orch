@@ -35,6 +35,8 @@ func (e *Engine) Ops() map[string]Handler {
 		"ask":             e.opAsk,
 		"reply":           e.opReply,
 		"inbox":           e.opInbox,
+		"steer.pull":      e.opSteerPull,
+		"steer.release":   e.opSteerRelease,
 		"task.create":     e.opTaskCreate,
 		"task.list":       e.opTaskList,
 		"task.show":       e.opTaskShow,
@@ -341,6 +343,9 @@ func (e *Engine) opSend(ctx context.Context, caller string, raw json.RawMessage)
 	to, err := e.resolveRecipients(ctx, caller, run, a.To)
 	if err != nil {
 		return nil, err
+	}
+	if a.Kind == store.KindSteer {
+		return e.sendSteer(run, caller, a, to)
 	}
 	var out []store.Message
 	for _, r := range to {

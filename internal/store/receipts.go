@@ -3,7 +3,7 @@ package store
 // readReceipt exposes a mailbox read as positive pickup evidence, including for
 // messages that were read before a terminal delivery job started.
 func readReceipt(m Message) Message {
-	if m.ReadAt != 0 && m.DeliveryStatus != "" {
+	if m.Kind != KindSteer && m.ReadAt != 0 && m.DeliveryStatus != "" {
 		if m.PickedUpAt == 0 {
 			m.PickedUpAt = m.ReadAt
 			m.PickupVia = "read"
@@ -47,5 +47,5 @@ func (s *Store) Undelivered(id, reason string) error {
 }
 
 func (s *Store) PendingDeliveries() ([]Message, error) {
-	return s.queryMsgs(`SELECT ` + msgCols + ` FROM messages WHERE delivery_status IN ('queued','submitting','delivered') AND read_at IS NULL AND picked_up_at IS NULL ORDER BY created_at,id`)
+	return s.queryMsgs(`SELECT ` + msgCols + ` FROM messages WHERE kind!='steer' AND delivery_status IN ('queued','submitting','delivered') AND read_at IS NULL AND picked_up_at IS NULL ORDER BY created_at,id`)
 }

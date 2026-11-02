@@ -23,21 +23,24 @@ type Message struct {
 	ReplyTo          string `json:"reply_to,omitempty"`
 	Outcome          string `json:"outcome,omitempty"`
 	CreatedAt        int64  `json:"created_at"`
+	InjectedAt       int64  `json:"injected_at,omitempty"`
+	AckedAt          int64  `json:"acked_at,omitempty"`
+	InjectCount      int    `json:"inject_count,omitempty"`
 	ReadAt           int64  `json:"read_at,omitempty"`
 }
 
-const msgCols = `id,COALESCE(run_id,''),from_pane,to_pane,subject,body,kind,COALESCE(task_id,''),COALESCE(reply_to,''),COALESCE(outcome,''),created_at,COALESCE(read_at,0),delivery_status,delivery_attempts,COALESCE(delivered_at,0),COALESCE(picked_up_at,0),pickup_via,delivery_error`
+const msgCols = `id,COALESCE(run_id,''),from_pane,to_pane,subject,body,kind,COALESCE(task_id,''),COALESCE(reply_to,''),COALESCE(outcome,''),created_at,COALESCE(read_at,0),delivery_status,delivery_attempts,COALESCE(delivered_at,0),COALESCE(picked_up_at,0),pickup_via,delivery_error,COALESCE(injected_at,0),COALESCE(acked_at,0),inject_count`
 
 func scanMsg(r interface{ Scan(...any) error }) (Message, error) {
 	var m Message
-	err := r.Scan(&m.ID, &m.RunID, &m.From, &m.To, &m.Subject, &m.Body, &m.Kind, &m.TaskID, &m.ReplyTo, &m.Outcome, &m.CreatedAt, &m.ReadAt, &m.DeliveryStatus, &m.DeliveryAttempts, &m.DeliveredAt, &m.PickedUpAt, &m.PickupVia, &m.DeliveryError)
+	err := r.Scan(&m.ID, &m.RunID, &m.From, &m.To, &m.Subject, &m.Body, &m.Kind, &m.TaskID, &m.ReplyTo, &m.Outcome, &m.CreatedAt, &m.ReadAt, &m.DeliveryStatus, &m.DeliveryAttempts, &m.DeliveredAt, &m.PickedUpAt, &m.PickupVia, &m.DeliveryError, &m.InjectedAt, &m.AckedAt, &m.InjectCount)
 	m = readReceipt(m)
 	return m, err
 }
 
 func ValidKind(k string) bool {
 	switch k {
-	case KindNote, KindQuestion, KindReply, KindDone, KindEscalation:
+	case KindNote, KindQuestion, KindReply, KindDone, KindEscalation, KindSteer:
 		return true
 	}
 	return false
@@ -46,7 +49,7 @@ func ValidKind(k string) bool {
 // InsertMessage stores m, assigning its id and timestamp.
 func (s *Store) InsertMessage(m Message) (Message, error) {
 	if !ValidKind(m.Kind) {
-		return m, refuse("bad_kind", "kind must be note|question|reply|done|escalation")
+		return m, refuse("bad_kind", "kind must be note|question|reply|done|escalation|steer")
 	}
 	if m.To == "" {
 		return m, refuse("no_recipient", "message has no recipient")
@@ -113,7 +116,7 @@ func (s *Store) Unread(recipients []string, mark bool) ([]Message, error) {
 	for i, r := range recipients {
 		args[i] = r
 	}
-	msgs, err := s.queryMsgs(`SELECT `+msgCols+` FROM messages WHERE read_at IS NULL AND to_pane IN (`+ph+`) ORDER BY created_at, id`, args...)
+	msgs, err := s.queryMsgs(`SELECT `+msgCols+` FROM messages WHERE read_at IS NULL AND kind!='steer' AND to_pane IN (`+ph+`) ORDER BY created_at, id`, args...)
 	if err != nil || !mark || len(msgs) == 0 {
 		return msgs, err
 	}
@@ -134,7 +137,7 @@ func (s *Store) Unread(recipients []string, mark bool) ([]Message, error) {
 // UnreadCount counts unread messages to pane.
 func (s *Store) UnreadCount(pane string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE to_pane=? AND read_at IS NULL`, pane).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE to_pane=? AND read_at IS NULL AND kind!='steer'`, pane).Scan(&n)
 	return n, err
 }
 

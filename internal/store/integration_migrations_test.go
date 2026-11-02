@@ -129,7 +129,7 @@ func TestUpgradeReleasedMainPreservesHoldsAndLifecycle(t *testing.T) {
 				t.Fatalf("upgrade invented delivery evidence: %+v", m)
 			}
 			var latest int
-			if err := s.db.QueryRow(`SELECT MAX(v) FROM schema_version`).Scan(&latest); err != nil || latest != 9 {
+			if err := s.db.QueryRow(`SELECT MAX(v) FROM schema_version`).Scan(&latest); err != nil || latest != 10 {
 				t.Fatalf("upgrade version=%d %v", latest, err)
 			}
 		})
