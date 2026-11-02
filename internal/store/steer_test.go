@@ -20,6 +20,9 @@ func ids(ms []Message) []string {
 
 func TestSteerStateTransitionsAndOrdering(t *testing.T) {
 	s := open(t)
+	if _, err := s.RegisterWorker(Worker{PaneID: "w1:p2", Agent: "claude"}); err != nil {
+		t.Fatal(err)
+	}
 	a := steerMsg(t, s, "w1:p2", "first")
 	b := steerMsg(t, s, "w1:p2", "second")
 	other := steerMsg(t, s, "w1:p3", "elsewhere")
@@ -63,6 +66,9 @@ func TestSteerStateTransitionsAndOrdering(t *testing.T) {
 
 func TestSteerAckIsRecipientScopedAndNeedsInjection(t *testing.T) {
 	s := open(t)
+	if _, err := s.RegisterWorker(Worker{PaneID: "w1:p2", Agent: "claude"}); err != nil {
+		t.Fatal(err)
+	}
 	m := steerMsg(t, s, "w1:p2", "x")
 	// Not yet injected: an ack for it is a no-op.
 	must[[]Message](t)(s.SteerPull("w1:p3", []string{m.ID}))
@@ -74,6 +80,9 @@ func TestSteerAckIsRecipientScopedAndNeedsInjection(t *testing.T) {
 
 func TestSteerReleaseRequeues(t *testing.T) {
 	s := open(t)
+	if _, err := s.RegisterWorker(Worker{PaneID: "w1:p2", Agent: "claude"}); err != nil {
+		t.Fatal(err)
+	}
 	m := steerMsg(t, s, "w1:p2", "x")
 	must[[]Message](t)(s.SteerPull("w1:p2", nil))
 	if err := s.SteerRelease("w1:p3", []string{m.ID}); err != nil {
@@ -104,5 +113,34 @@ func TestSteerStaysOutOfMailboxAndTerminalDelivery(t *testing.T) {
 	}
 	if in := must[[]Message](t)(s.Inbox("w1:p1", 10)); len(in) != 1 || in[0].Kind != KindSteer {
 		t.Fatalf("not visible in inbox: %+v", in)
+	}
+}
+
+func TestSteerPullBoundedAndExpiredOnRelease(t *testing.T) {
+	s := open(t)
+	if _, err := s.RegisterWorker(Worker{PaneID: "w1:p2", Agent: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < SteerPullMax+2; i++ {
+		if _, err := s.InsertMessage(Message{From: "c:p1", To: "w1:p2", Kind: KindSteer, Body: "n", DeliveryStatus: SteerQueued}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.SteerPull("w1:p2", nil)
+	if err != nil || len(got) != SteerPullMax {
+		t.Fatalf("first pull: %d %v", len(got), err)
+	}
+	if err := s.SetWorkerState("w1:p2", WorkerReleased, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.SteerPull("w1:p2", nil); len(got) != 0 {
+		t.Fatalf("released pane still pulls %d notes", len(got))
+	}
+	// a new tenant of the same pane id starts clean
+	if _, err := s.RegisterWorker(Worker{PaneID: "w1:p2", Agent: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.SteerPull("w1:p2", nil); len(got) != 0 {
+		t.Fatalf("new tenant received %d stale notes", len(got))
 	}
 }

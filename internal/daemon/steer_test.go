@@ -136,3 +136,29 @@ func TestSteerableRequiresInstalledHook(t *testing.T) {
 		t.Fatal("steerable mismatch")
 	}
 }
+
+func TestSteerRefusesOversizedBody(t *testing.T) {
+	x := newHarness(t)
+	var run store.Run
+	x.mustOp(coord, "run.create", RunCreateArgs{Title: "steer"}, &run)
+	x.e.cfg.SteerDir = t.TempDir()
+	if _, err := x.e.sendSteer(run, coord, SendArgs{Body: strings.Repeat("x", store.SteerBodyMax+1)}, []string{"w1:p2"}); err == nil {
+		t.Fatal("oversized steer accepted")
+	}
+}
+
+func TestSteerToReleasedWorkerDoesNotQueueForReuse(t *testing.T) {
+	x := newHarness(t)
+	var run store.Run
+	x.mustOp(coord, "run.create", RunCreateArgs{Title: "steer"}, &run)
+	x.e.cfg.SteerDir = t.TempDir()
+	if _, err := x.st.RegisterWorker(store.Worker{PaneID: "w1:p2", RunID: run.ID, Name: "w", Agent: "claude", AgentArgs: []string{"--settings", SteerSettingsPath(x.e.cfg.SteerDir)}, LaunchKnown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.st.SetWorkerState("w1:p2", store.WorkerReleased, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if x.e.steerable("w1:p2") {
+		t.Fatal("released worker is steerable")
+	}
+}

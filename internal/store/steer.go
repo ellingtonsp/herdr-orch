@@ -11,6 +11,21 @@ const (
 	SteerAcknowledged = "acknowledged"
 )
 
+// Bounds keep one hook call well under Claude Code's hook-output cap: a body is limited at
+// send time, and at most SteerPullMax notes are injected per call (the rest stay queued,
+// in order, for the next tool boundary).
+const (
+	SteerBodyMax = 2000
+	SteerPullMax = 4
+)
+
+// expireSteer marks a pane's undelivered steer notes undelivered; a pane id can be reused by
+// a later worker, which must never receive the previous tenant's notes.
+func expireSteer(tx *sql.Tx, pane string) error {
+	_, err := tx.Exec(`UPDATE messages SET delivery_status='undelivered',delivery_error='worker released' WHERE to_pane=? AND kind='steer' AND delivery_status IN (?,?)`, pane, SteerQueued, SteerInjected)
+	return err
+}
+
 // SteerPull acknowledges the injected notes in ack (ids the caller proved it emitted),
 // then returns pane's pending notes in send order and marks them injected. Notes that were
 // injected but never acknowledged are returned again.
@@ -23,7 +38,7 @@ func (s *Store) SteerPull(pane string, ack []string) ([]Message, error) {
 				return err
 			}
 		}
-		rows, err := tx.Query(`SELECT id FROM messages WHERE to_pane=? AND kind='steer' AND delivery_status IN (?,?) ORDER BY created_at,id`, pane, SteerQueued, SteerInjected)
+		rows, err := tx.Query(`SELECT id FROM messages WHERE to_pane=? AND kind='steer' AND delivery_status IN (?,?) AND EXISTS (SELECT 1 FROM workers WHERE pane_id=? AND state='live') ORDER BY created_at,rowid LIMIT ?`, pane, SteerQueued, SteerInjected, pane, SteerPullMax)
 		if err != nil {
 			return err
 		}

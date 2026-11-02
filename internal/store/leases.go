@@ -231,6 +231,9 @@ func (s *Store) ReleaseWorkerWithLeases(pane, note, archive string, handOffTo ..
 		if n != 1 {
 			return refuse("unknown_worker", "pane %s is not a registered worker", pane)
 		}
+		if err := expireSteer(tx, pane); err != nil {
+			return err
+		}
 		if target != "" {
 			// A pane's verified hand-off directory may differ from its earlier
 			// registration. Persist responsibility before a later sweep or release.

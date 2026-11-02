@@ -58,7 +58,7 @@ func (e *Engine) opSteerRelease(_ context.Context, caller string, raw json.RawMe
 // steerable reports whether pane is a worker launched with the steering hook installed.
 func (e *Engine) steerable(pane string) bool {
 	w, err := e.st.GetWorker(pane)
-	if err != nil || w.Agent != "claude" || e.cfg.SteerDir == "" {
+	if err != nil || w.Agent != "claude" || w.State != store.WorkerLive || e.cfg.SteerDir == "" {
 		return false
 	}
 	want := SteerSettingsPath(e.cfg.SteerDir)
@@ -120,6 +120,9 @@ func (e *Engine) installSteering(agent string, args []string) []string {
 func (e *Engine) sendSteer(run store.Run, caller string, a SendArgs, to []string) (any, error) {
 	if a.WaitPickup {
 		return nil, refusal("bad_args", "--wait-pickup does not apply to steering; the receipt moves queued → injected → acknowledged (see horch inbox)")
+	}
+	if len(a.Body) > store.SteerBodyMax {
+		return nil, refusal("too_long", "steer body is %d bytes; the limit is %d (send a short pointer, not a document)", len(a.Body), store.SteerBodyMax)
 	}
 	var out []store.Message
 	for _, r := range to {
